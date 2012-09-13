@@ -208,10 +208,7 @@
   just needs to let the ds notificaton arrive.  If the file isn't
   known yet, it oes a settimeout for 50ms and tries again 
 
-  should mediadb automatically run a scan when ds is mounted? Maybe
-  apps never need to do that.  Could scan() become an internal method?
-  If so, mediadb would fire scanstart and scanend events and the scanend
-  event would include scan results so that UX could show stuff
+  I think I need to do real events and implement EventTarget for real.
 
   Inputs to mediadb:
 
@@ -236,12 +233,12 @@
 
   scan:
 
-    quick scan -> addRecords() -> single change event output
+    quick scan -> addRecord() -> single change event output
     full scan -> removeRecords() -> single change event output
     full scan -> addRecords() -> single change event output
 
 
-  does scan() have to batch everything itself, or can it just call
+ DONE  does scan() have to batch everything itself, or can it just call
    addRecord and removeRecord and have those serialize all the async
    operations and batch stuff?  I think the scan algorithm will be
    much simpler if addRecord() and removeRecord() queue things up and
@@ -249,15 +246,61 @@
    gallery/js/MetadataParser.js for an example. Doing this in
    addRecord() would mean we can remove it from there, too.
 
-  How am I currently serializing scanning and metadata parsing?  Can I
-  generalize that?
-
-  for quick scan, instead of storing the last scan time, can I instead
+  DONE for quick scan, instead of storing the last scan time, can I instead
   just query the db for the most recent file?  That would mean
   automatically creating an index for the date field, but I want that
   anyway, really.  Then I can get rid of localStorage in the apps and
   don't even have to switch to asyncStorage.  Note that I'd only have
   to query the db for the newest file in the constructor.
+
+->    Add scanstart and scanend output events
+      partially done with just onscanstart and onscancomplete properties
+
+->    Implement addEventListener() and removeEventListener methods
+        so we're not just relying on onchange, onready, etc.
+
+->   should mediadb automatically run a scan when ds is mounted? Maybe
+  apps never need to do that.  Could scan() become an internal method?
+  If so, mediadb would fire scanstart and scanend events and the scanend
+  event would include scan results so that UX could show stuff
+  This is probably the way to go. The idea is that mediadb is a painless
+  model of the filesystem. Apps should just be able to create and forget
+  and not have to worry about scanning
+
+->  Should I replace the MediaDB constructor with a factory function?
+  Then I wouldn't need an onready callback... I'd just pass a callback
+  to the factory and have it pass the mediadb object to the callback
+  when it was ready.  (But then I'd still need separate on available,
+  on unavailable events)
+
+-> update documentation
+
+-> As part of this refactor, I need to write tests.
+
+     Put a bunch of dummy files in /sdcard/mediadbtest/ or something
+       like that. Pretend they're all photos and give them .jpeg
+       extensions to make device storage happy. Use the file contents
+       as stringified metadata, so the metadata parser just does JSON.parse
+       on file contents and returns that.  (or just use plain strings)
+
+     then create a mediadb, start a scan (or do I build that in?)
+       and see if we get change events for all the files.
+       then enumerate and make sure we get them all
+       then add and delete files and see if we get events for them
+       even try overwriting a file and see if we get delete/create
+
+     Then close teh mediadb (may need to add a method for this)
+       and reopen it. Enumerate to make sure we still get all files
+       see that a scan happens (scanstart scancomplete) but that
+       it doesn't find anything new.
+
+     Add a file of a different type (using a different devce storage object)
+       and verify that we don't pick it up?
+
+     Verify that the metadata for the files is correct.
+
+     Verify that we can sort by metadata and 
+
 
  */
 
@@ -280,6 +323,13 @@ function MediaDB(mediaType, metadataParser, options) {
   this._pendingDeleteNotifications = [];  // Ditto
   this._pendingNotificationTimer = null;
 
+  // This property holds the modification date of the newest file we know about.
+  // We need to know the newest file in order to look for newer ones during
+  // scanning. We initialize newestFileModTime during initialization by 
+  // actually checking the database (using the date index). We also update
+  // this property every time a new record is added to the database.
+  this.newestFileModTime = 0;
+
   // Define a dummy metadata parser if we're not given one
   if (!this.metadataParser) {
     this.metadataParser = function(file, callback) {
@@ -289,7 +339,6 @@ function MediaDB(mediaType, metadataParser, options) {
 
   var media = this;  // for the nested functions below
 
-
   // Set up IndexedDB
   var indexedDB = window.indexedDB || window.mozIndexedDB;
   if (IDBObjectStore && IDBObjectStore.prototype.mozGetAll) {
@@ -298,9 +347,6 @@ function MediaDB(mediaType, metadataParser, options) {
 
   this.dbname = 'MediaDB/' + mediaType + '/' + this.directory;
   var openRequest = indexedDB.open(this.dbname, this.version);
-
-  this.lastScanTime =
-    parseInt(localStorage.getItem(this.dbname + '.lastScanTime')) || null;
 
   // This should never happen for Gaia apps
   openRequest.onerror = function(e) {
@@ -325,7 +371,13 @@ function MediaDB(mediaType, metadataParser, options) {
 
     // Now build the database
     var filestore = db.createObjectStore('files', { keyPath: 'name' });
+    // Always index the files by modification date
+    filestore.createIndex('date', 'date');
+    // And index them by any other file properties or metadata properties
+    // passed to the constructor
     media.indexes.forEach(function(indexName)  {
+      if (indexName === 'name' || indexName === 'date') 
+        return;
       // the index name is also the keypath
       filestore.createIndex(indexName, indexName);
     });
@@ -341,8 +393,32 @@ function MediaDB(mediaType, metadataParser, options) {
       console.error('MediaDB: ', event.target.error && event.target.error.name);
     }
 
-    // DB is initialized, now initialize device storage
-    initDeviceStorage();
+    // Query the db to find the modification time of the newest file
+    var cursorRequest =
+      media.db.transaction('files', 'readonly')
+      .objectStore('files')
+      .index('date')
+      .openCursor(null, 'prev');
+    
+    cursorRequest.onerror = function() {
+      // If anything goes wrong just display an error.
+      // If this fails, don't even attempt error recovery
+      console.error('MediaDB initialization error', cursorRequest.error);
+    };
+    cursorRequest.onsuccess = function() {
+      var cursor = cursorRequest.result;
+      if (cursor) {
+        media.newestFileModTime = cursor.value.date;
+      }
+      else {
+        // No files in the db yet, so use a really old time
+        media.newestFileModTime = 0;
+      }
+
+      // The DB is initialized, and we've got our mod time
+      // so move on and initialize device storage
+      initDeviceStorage();
+    };
   };
 
   function initDeviceStorage() {
@@ -615,188 +691,94 @@ MediaDB.prototype = {
   // that, a full scan will be compared with a full dump of the DB
   // to see if any files have been deleted.
   //
-  scan: function scan(scanCompleteCallback) {
+  scan: function scan() {
     if (!this.db)
       throw Error('MediaDB is not ready yet. Use the onready callback');
+
+    if (this.onscanstart) 
+      this.onscanstart();
 
     var media = this;
 
     // First, scan for new files since the last scan, if there was one
     // When the quickScan is done it will begin a full scan.  If we don't
     // have a last scan date, then we just begin a full scan immediately
-    if (media.lastScanTime) {
-      quickScan(media.lastScanTime);
+    if (media.newestFileModTime > 0) {
+      quickScan(media.newestFileModeTime);
     }
     else {
       fullScan();
     }
 
-    // Do a quick scan and then follow with a full scan
-    function quickScan(date) {
-      var newfiles = [];
+    // Return true if media db should ignore this file.
+    // If the file name begins with a . we'll ignore it.
+    // (. files seem to be created during USB Mass Storage sessions on a Mac)
+    // If an array of media types was specified when the MediaDB was created
+    // and the type of this file is not a member of that list, then ignore it.
+    function ignore(file) {
+      if (file.name[file.name.lastIndexOf('/')+1] === '.')
+        return true;
+      if (media.mimeTypes && media.mimeTypes.indexOf(file.type) === -1) 
+        return true;
+      return false;
+    }
 
+    // Do a quick scan and then follow with a full scan
+    function quickScan(timestamp) {
       var cursor = media.storage.enumerate(media.directory, {
-        since: new Date(date)
+        since: new Date(timestamp)
       });
 
       cursor.onsuccess = function() {
-        var result = cursor.result;
-        if (result) {
-          processNewFile(result);
-        }
-        else {// When no more files
-          if (newfiles.length > 0) {
-            // report new files we found, then do a full scan
-            saveAndReportQuickScanResults(fullScan);
-          }
-          else {
-            // If we didn't find any new files, go direct to the full scan
-            fullScan();                         // do full scan
-          }
-        }
-      }
-
-      // We found a new file in device storage.
-      // Extract its metadata and remember it.
-      // (Don't store it in the db yet)
-      // Then call cursor.continue to move on to the next file
-      function processNewFile(file) {
-        try {
-          // Skip the file if it isn't the right type
-          if (media.mimeTypes && media.mimeTypes.indexOf(file.type) === -1) {
-            cursor.continue();
-            return;
-          }
-
-          var fileinfo = {
-            name: file.name,
-            type: file.type,
-            size: file.size,
-            date: file.lastModifiedDate.getTime()
-          };
-
-          media.metadataParser(file, function(metadata) {
-            fileinfo.metadata = metadata;
-            // Only remember this file if we got valid metadata for it
-            if (metadata != null)
-              newfiles.push(fileinfo);
-            cursor.continue();
-          }, function(error) {
-            console.error(error);
-            cursor.continue();
-          });
-        }
-        catch (e) {
-          console.error(e);
+        var file = cursor.result;
+        if (file) {
+          if (!ignore(file)) 
+            media._insertRecord(file);
           cursor.continue();
         }
-      }
-
-      // Take all the file info objects we found and save them
-      // to the database, then report them with the fileAdded callback
-      // And finally, call the next() function to continue with a full scan
-      function saveAndReportQuickScanResults(next) {
-        var transaction = media.db.transaction('files', 'readwrite');
-        var store = transaction.objectStore('files');
-        var numSaved = 0;
-        var errors = [];
-
-        // Save the new files
-        for (var i = 0; i < newfiles.length; i++) {
-          saveFile(i);
+        else {
+          // Quick scan is done, so move on to the slower, more thorough stage
+          fullScan();
         }
-
-        function saveFile(i) {
-          // When an existing file is overwritten, we should report
-          // it as a deletion followed by a creation. So for this quick
-          // scan pass, we're only interested in new files, which means
-          // that we need to use add() rather than put() to add to the db.
-          var addRequest = store.add(newfiles[i]);
-
-          addRequest.onerror = function(e) {
-            // It probably failed because a file by that name is
-            // already in the db. Don't save or report it now. We'll
-            // handle it when we do a full scan.
-            errors.push(i);
-
-            // Don't let the higher-level DB error handler report the error
-            e.stopPropagation();
-            // And don't spew a default error message to the console either
-            e.preventDefault();
-
-            if (++numSaved === newfiles.length)
-              report();
-          };
-
-          addRequest.onsuccess = function() {
-            if (++numSaved === newfiles.length)
-              report();
-          };
-        }
-
-        function report() {
-          // If there were errors saving any of the files, it was because
-          // those files were already in the db. That means they're changed
-          // files not new files, and we'll report them later.
-          // Carefully remove those new files, taking care about the
-          // shifting indexes
-          if (errors.length > 0) {
-            errors.forEach(function(i) { newfiles[errors[i]] = null; });
-            newfiles = newfiles.filter(function(f) { return f != null; });
-          }
-
-          // Finally, call the onchange handler about the new files
-          // if there are any
-          if (newfiles.length > 0 && media.onchange)
-            media.onchange('created', newfiles);
-
-          // Finally, move on to the next thing
-          next();
-        }
-      }
+      };
     }
 
     // Get a complete list of files from DeviceStorage
     // Get a complete list of files from IndexedDB.
-    // Sort them both (the indexedDB list may already be sorted)
+    // Sort them both (the indexedDB list will already be sorted)
     // Step through the lists noting deleted files and created files.
     // Pay attention to files whose size or date has changed and
     // treat those as deletions followed by insertions.
-    // Sync up the database while stepping through the lists and
-    // then call the onchange handler to report deleted files and
-    // created files.  (Report deleted files first because we model
-    // file changes as deletions followed by creations)
+    // Sync up the database while stepping through the lists.
     function fullScan() {
-      media.lastScanTime = Date.now();
-      localStorage[media.dbname + '.lastScanTime'] = media.lastScanTime;
 
-      var store = media.db.transaction('files').objectStore('files');
-      var getAllRequest = store.getAll();
-
-      getAllRequest.onsuccess = function() {
-        var dbfiles = getAllRequest.result;  // Should already be sorted
-
-        // Now get all the files in device storage
-        var dsfiles = [];
-        var cursor = media.storage.enumerate(media.directory);
-
-        cursor.onsuccess = function() {
-          var file = cursor.result;
-          if (file) {
-            if (!media.mimeTypes || media.mimeTypes.indexOf(file.type) !== -1) {
-              dsfiles.push({
-                name: file.name,
-                type: file.type,
-                size: file.size,
-                date: file.lastModifiedDate.getTime()
-              });
-            }
-            cursor.continue();
+      // The db may be busy right about now, processing files that
+      // were found during the quick scan.  So we'll start off by
+      // enumerating all files in device storage
+      var dsfiles = [];
+      var cursor = media.storage.enumerate(media.directory);
+      cursor.onsuccess = function() {
+        var file = cursor.result;
+        if (file) {
+          if (!ignore(file)) {
+            dsfiles.push(file);
           }
-          else { // When no more files
-            compareLists(dbfiles, dsfiles);
-          }
+          cursor.continue();
         }
+        else {
+          // We're done enumerating device storage, so get all files from db
+          getDBFiles();
+        }
+      }
+
+      function getDBFiles() {
+        var store = media.db.transaction('files').objectStore('files');
+        var getAllRequest = store.getAll();
+        
+        getAllRequest.onsuccess = function() {
+          var dbfiles = getAllRequest.result;  // Should already be sorted
+          compareLists(dbfiles, dsfiles);
+        };
       }
 
       function compareLists(dbfiles, dsfiles) {
@@ -808,9 +790,6 @@ MediaDB.prototype = {
           else
             return 1;
         });
-
-        var deletedFiles = [];
-        var createdFiles = [];
 
         // Loop through both the dsfiles and dbfiles lists
         var dsindex = 0, dbindex = 0;
@@ -836,7 +815,7 @@ MediaDB.prototype = {
           // Case 2: no more files in the db.  This means that
           // the file from ds is a new one
           if (dbfile === null) {
-            createdFiles.push(dsfile);
+            media._insertRecord(dsfile);
             dsindex++;
             continue;
           }
@@ -844,7 +823,7 @@ MediaDB.prototype = {
           // Case 3: no more files in ds. This means that the db file
           // has been deleted
           if (dsfile === null) {
-            deletedFiles.push(dbfile);
+            media._deleteRecord(dbfile.name);
             dbindex++;
             continue;
           }
@@ -853,9 +832,10 @@ MediaDB.prototype = {
           // 4a: date and size are the same for both: do nothing
           // 4b: file has changed: it is both a deletion and a creation
           if (dsfile.name === dbfile.name) {
-            if (dsfile.date !== dbfile.date || dsfile.size !== dbfile.size) {
-              deletedFiles.push(dbfile);
-              createdFiles.push(dsfile);
+            if (dsfile.lastModifiedDate.getTime() !== dbfile.date ||
+                dsfile.size !== dbfile.size) {
+              media._deleteRecord(dbfile.name);
+              media._insertRecord(dsfile);
             }
             dsindex++;
             dbindex++;
@@ -865,7 +845,7 @@ MediaDB.prototype = {
           // Case 5: the dsfile name is less than the dbfile name.
           // This means that the dsfile is new.  Like case 2
           if (dsfile.name < dbfile.name) {
-            createdFiles.push(dsfile);
+            media._insertRecord(dsfile);
             dsindex++;
             continue;
           }
@@ -873,7 +853,7 @@ MediaDB.prototype = {
           // Case 6: the dsfile name is greater than the dbfile name.
           // this means that the dbfile no longer exists on disk
           if (dsfile.name > dbfile.name) {
-            deletedFiles.push(dbfile);
+            media._deleteRecord(dbfile.name);
             dbindex++;
             continue;
           }
@@ -883,107 +863,23 @@ MediaDB.prototype = {
           console.error('Assertion failed');
         }
 
-        // Deal with the deleted files first
-        if (deletedFiles.length > 0) {
-          var transaction = media.db.transaction('files', 'readwrite');
-          var store = transaction.objectStore('files');
-          deletedFiles.forEach(function(fileinfo) {
-            store.delete(fileinfo.name);
-          });
-          // When all the deletions are done, report the deleted files
-          // And then deal with the new files
-          transaction.oncomplete = function() {
-            if (media.onchange)
-              media.onchange('deleted', deletedFiles);
-
-            // If there were created files, handle them.
-            // Otherwise, we're done scanning.
-            if (createdFiles.length > 0)
-              handleCreatedFiles();
-            else if (scanCompleteCallback)
-              scanCompleteCallback();
-          };
-        }
-        else if (createdFiles.length > 0) {
-          // If there were no deleted files, we still need to
-          // handle the created ones.  Especially for first-run
-          handleCreatedFiles();
-        }
-        else {
-          // If the full scan didn't find any changes at all, we're done
-          if (scanCompleteCallback)
-            scanCompleteCallback();
-        }
-
-        function handleCreatedFiles() {
-          // Get file metadata and then store the files
-          getMetadataForFile(0, storeCreatedFiles);
-        }
-
-        // This function gets metadata for created files n and up
-        // and then calls the callback. We
-        function getMetadataForFile(n, callback) {
-          var fileinfo = createdFiles[n];
-          var fileRequest = media.storage.get(fileinfo.name);
-          var isComplete = function() {
-            if (n === createdFiles.length) { // if we're done
-              callback();
-            } else { // Otherwise get the next one
-              getMetadataForFile(n, callback);
-            }
-          }
-          fileRequest.onsuccess = function() {
-            var file = fileRequest.result;
-            media.metadataParser(file, function parser_success(metadata) {
-              fileinfo.metadata = metadata;
-              n++;
-              isComplete();
-            }, function parser_error() {
-              n++;
-              isComplete();
-            });
-          }
-        }
-
-        function storeCreatedFiles() {
-          // Only store files that have metadata. If the parser couldn't
-          // return valid metadata, then the file is probably of the wrong type
-          var validFiles = createdFiles.filter(function(f) {
-            return f.metadata;
-          });
-
-          var transaction = media.db.transaction('files', 'readwrite');
-          var store = transaction.objectStore('files');
-          for (var i = 0; i < validFiles.length; i++) {
-            store.add(validFiles[i]).onerror = function(e) {
-              // XXX: 6/22: this is failing AbortError on otoro
-              console.error(e.target.error.name + ' while storing fileinfo');
-              e.stopPropagation();
-            };
-          }
-
-          // Now once we're done storing the files deliver a notification
-          if (media.onchange)
-            media.onchange('created', validFiles);
-
-          // And finally, call the scanCompleteCallback
-          if (scanCompleteCallback)
-            scanCompleteCallback();
-        }
+        // Push a special value onto the queue so that when it is 
+        // processed we can trigger a 'scancomplete' event
+        media._insertRecord(null);
       }
     }
   },
 
 
-  // An internal method. Pass in the name of a file (that device storage already
-  // knows about). The function queue it up for metadata parsing and insertion
+  // An internal method. Pass in a file, or a filename.
+  // The function queue it up for metadata parsing and insertion
   // into the database, and will send a mediadb change event (possibly batched
   // with other changes).  Ensures that only one file is being parsed
   // at a time, but tries to make as many db changes in one transaction
-  // as possible.  
-  _insertRecord: function(filename) {
+  // as possible.  The special value null indicates that scanning is complete.
+  _insertRecord: function(fileOrName) {
     // Add this file to the queue of files to process
-    this._pendingInsertions.push(filename);
+    this._pendingInsertions.push(fileOrName);
 
     // If the queue is already being processed, just return
     if (this.processingQueue)
@@ -1021,7 +917,7 @@ MediaDB.prototype = {
         deleteFiles();
       }
       else if (media._pendingInsertions.length > 0) {
-        insertFilename(media._pendingInsertions.shift());
+        insertFile(media._pendingInsertions.shift());
       }
       else {
         this.processingQueue = false;
@@ -1054,31 +950,33 @@ MediaDB.prototype = {
       }
     }
 
-    // XXX:
-    // Wait. This function does async device storage and blob reading.
-    // So does that mean the transaction will commit? And by the time
-    // we're ready to write to the object store, the transaction won't 
-    // be valid anymore?
-    // 
-    // We can handle a queue of deletes in one transaction, but maybe
-    // not a queue of inserts.  So one transaction per insert, I guess.
-    // I bet metadata parsing takes a lot more time than the transactions
-    // so perf should be okay. This means the batching will have to happen
-    // at the event generation level rather than at the db transaction level
-    // 
+    // Insert a file into the db. One transaction per insertion.
+    // The argument might be a filename or a File object
+    function insertFile(f) {
+      // null is a special value pushed on to the queue when a scan()
+      // is complete.  We use it to trigger a scancomplete event
+      // after all the change events from the scan are delivered
+      if (f === null) {
+        media._queueInsertNotification(null);
+        return;
+      }
 
-    // Insert a file into the db. One transaction per insertion
-    function insertFilename(filename) {
-      // Get the file
-      var getreq = media.storage.get(filename);
-      getreq.onerror = function() {
-        console.warn('MediaDB: Unknown file in _insertRecord:',
-                     filename, getreq.error);
-        next();
-      };
-      getreq.onsuccess = function() {
-        parseMetadata(getreq.result);
-      };
+      // If we got a filename, look up the file in device storage
+      if (typeof f === 'string') {
+        var getreq = media.storage.get(filename);
+        getreq.onerror = function() {
+          console.warn('MediaDB: Unknown file in _insertRecord:',
+                       filename, getreq.error);
+          next();
+        };
+        getreq.onsuccess = function() {
+          parseMetadata(getreq.result);
+        };
+      }
+      else {
+        // otherwise f is the file we want
+        parseMetadata(f);
+      }
     }
     
     function parseMetdata(file) {
@@ -1090,6 +988,9 @@ MediaDB.prototype = {
         date: file.lastModifiedDate.getTime()
       }
       
+      if (fileinfo.date > media.newestFileModTime)
+        media.newestFileModTime = fileinfo.date;
+
       // Get metadata about the file
       media.metadataParser(file, gotMetadata, metadataError);
       function metadataError(e) {
@@ -1115,14 +1016,18 @@ MediaDB.prototype = {
         // And go on to the next
         next();
       };
-      request.onerror = function() {
+      request.onerror = function(event) {
         // If the error name is "ConstraintError" it means that the
         // file already exists in the database. So try again, using put()
-        // instead of add().  If that succeeds, then queue a delete
+        // instead of add(). If that succeeds, then queue a delete
         // notification along with the insert notification.  If the 
         // second try fails, or if the error was something different
         // then issue a warning and continue with the next.
         if (request.error.name === "ConstraintError") {
+          // Don't let the higher-level DB error handler report the error
+          event.stopPropagation();
+          // And don't spew a default error message to the console either
+          event.preventDefault();
           var putrequest = store.put(fileinfo);
           putrequest.onsuccess = function() {
             media._queueDeleteNotification(fileinfo.name);
@@ -1149,9 +1054,22 @@ MediaDB.prototype = {
 
   // Don't send out notification events right away. Wait a short time to
   // see if others arrive that we can batch up.  This is common for scanning
+  // But if we're invoked with null as the argument that is the signal that
+  // a scan() has just completed, so push out all notifications right away
+  // and trigger a scancomplete notification
   _queueCreateNotification: function(fileinfo) {
-    this._pendingCreateNotifications.push(fileinfo);
-    this._resetNotificationTimer();
+    if (fileinfo) {
+      this._pendingCreateNotifications.push(fileinfo);
+      this._resetNotificationTimer();
+    }
+    else {
+      // special end-of-scan case
+      if (this._pendingNotificationTimer)
+        clearTimeout(this._pendingNotificationTimer);
+      this._notify();
+      if (this.onscancomplete)
+        this.onscancomplete();
+    }
   },
 
   _queueDeleteNotification: function(filename) {
@@ -1160,38 +1078,34 @@ MediaDB.prototype = {
   },
 
   _resetNotificationTimer: function() {
-    var media = this;
     if (this._pendingNotificationTimer)
       clearTimeout(this._pendingNotificationTimer);
     this._pendingNotificationTimer =
-      setTimeout(notify, MediaDB.NOTIFICATION_HOLD_TIME);
+      setTimeout(this._notify.bind(this), MediaDB.NOTIFICATION_HOLD_TIME);
+  },
 
-    // Send out notifications for creations and deletions
-    function notify() {
-      var insertions = media._pendingCreateNotifications;
-      media._pendingCreateNotifications = [];
-
-      if (media.onchange) {
-        if (media._pendingDeleteNotifications.length > 0) {
-          var deletions = media._pendingDeleteNotifications;
-          media._pendingDeleteNotifications = [];
-          try {
-            media.onchange('deleted', deletions);
-          }
-          catch(e) {
-            console.error("MediaDB: onchange delete handler threw", e);
-          }
+  // Send out notifications for creations and deletions
+  _notify: function() {
+    if (this.onchange) {
+      if (this._pendingDeleteNotifications.length > 0) {
+        var deletions = this._pendingDeleteNotifications;
+        this._pendingDeleteNotifications = [];
+        try {
+          this.onchange('deleted', deletions);
         }
-
-        if (media._pendingCreateNotifications.length > 0) {
-          var creations = media._pendingCreateNotifications;
-          media._pendingCreateNotifications = [];
-          try {
-            media.onchange('created', creations);
-          }
-          catch(e) {
-            console.error("MediaDB: onchange create handler threw", e);
-          }
+        catch(e) {
+          console.error("MediaDB: onchange delete handler threw", e);
+        }
+      }
+      
+      if (this._pendingCreateNotifications.length > 0) {
+        var creations = this._pendingCreateNotifications;
+        this._pendingCreateNotifications = [];
+        try {
+          this.onchange('created', creations);
+        }
+        catch(e) {
+          console.error("MediaDB: onchange create handler threw", e);
         }
       }
     }
