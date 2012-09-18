@@ -1,4 +1,4 @@
-/* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- /
+/* -*- Mode: js; js-indent-level: 2; indent-tabs-mode: nil -*- */
 /* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
 
 // TODO:
@@ -123,13 +123,15 @@ var photoFrames = $('photo-frames');
 var thumbnailListView = $('thumbnail-list-view');
 var thumbnailSelectView = $('thumbnail-select-view');
 var photoView = $('photo-view');
-var pickView = $('pick-view');
 var editView = $('edit-view');
+var pickView = $('pick-view');
+var openView = $('open-view');
 
 // These are the top-level view objects.
 // This array is used by setView()
 var views = [
-  thumbnailListView, thumbnailSelectView, photoView, pickView, editView
+  thumbnailListView, thumbnailSelectView, photoView, editView,
+  pickView, openView
 ];
 var currentView;
 
@@ -230,12 +232,13 @@ function init() {
     event.detail.forEach(imageDeleted);
   };
 
+
   // Start off in thumbnail list view, unless there is a pending activity
   // request message. In that case, the message handler will set the
   // initial view
   if (!navigator.mozHasPendingMessage('activity'))
     setView(thumbnailListView);
-
+  
   // Register a handler for activities
   navigator.mozSetMessageHandler('activity', webActivityHandler);
 }
@@ -383,9 +386,6 @@ function setView(view) {
     Array.forEach(thumbnails.querySelectorAll('.selected.thumbnail'),
                   function(elt) { elt.classList.remove('selected'); });
     break;
-  case editView:
-    // Cleanup is done in exitEditMode() before this function is called
-    break;
   }
 
   // Show the specified view, and hide the others
@@ -410,13 +410,11 @@ function setView(view) {
   case pickView:
     pickView.appendChild(thumbnails);
     break;
-  case photoView:
-    // No thumbnails in photoView
-    break;
-  case editView:
-    // We don't display the thumbnails in edit view.
-    // the editPhoto() function does the necessary setup and
-    // calls setView(), so there isn't anything to do here.
+  default:
+    // In any other view, remove the thumbnails from the document so 
+    // they don't show anywhere
+    if (thumbnails.parentNode)
+      thumbnails.parentNode.removeChild(thumbnails);
     break;
   }
 
@@ -465,25 +463,41 @@ function createThumbnail(imagenum) {
 
 // Register this with navigator.mozSetMessageHandler
 function webActivityHandler(activityRequest) {
-  var activityName = activityRequest.source.name;
-
-  switch (activityName) {
-  case 'browse':
-    if (launchedAsInlineActivity)
-      return;
-
-    // The 'browse' activity is just the way we launch the app
-    // There's nothing else to do here.
-    setView(thumbnailListView);
-    break;
-  case 'pick':
-    if (!launchedAsInlineActivity)
-      return;
-
-    if (pendingPick)
-      cancelPick();
-    startPick(activityRequest);
-    break;
+  // We can't handle any kind of activity if the MediaDB is not ready
+  if (photodb.state === MediaDB.READY)
+    handleActivity();
+  else {
+    photodb.addEventListener('ready', function waitTillReady() {
+      photodb.removeEventListener('ready', waitTillReady);
+      handleActivity();
+    });
+  }
+    
+  function handleActivity() {
+    var activityName = activityRequest.source.name;
+    switch (activityName) {
+    case 'browse':
+      if (launchedAsInlineActivity)
+        return;
+      
+      // The 'browse' activity is just the way we launch the app
+      // There's nothing else to do here.
+      setView(thumbnailListView);
+      break;
+    case 'pick':
+      if (!launchedAsInlineActivity)
+        return;
+      
+      if (pendingPick)
+        cancelPick();
+      startPick(activityRequest);
+      break;
+    case 'open':
+      if (!launchedAsInlineActivity)
+        return;
+      handleOpenActivity(activityRequest);
+      break;
+    }
   }
 }
 
@@ -520,6 +534,100 @@ window.addEventListener('mozvisiblitychange', function() {
   if (document.mozHidden && pendingPick)
     cancelPick();
 });
+
+function handleOpenActivity(request) {
+  var filename = request.source.data.filename;
+  console.log("handleOpenActivity", filename);
+
+  var frame = $('open-frame');
+  var image = $('open-image');
+  var cameraButton = $('open-camera-button');
+  var deleteButton = $('open-delete-button');
+
+  setView(openView);
+  displayFile(image, filename);
+
+  var gestureDetector = new GestureDetector(frame).startDetecting();
+  var openPhotoState = null;  // lazily initialized
+
+  cameraButton.addEventListener('click', handleCameraButton);
+  deleteButton.addEventListener('click', handleDeleteButton);
+  frame.addEventListener('dbltap', handleDoubleTap);
+  frame.addEventListener('transform', handleTransform);
+  frame.addEventListener('pan', handlePan);
+  frame.addEventListener('swipe', handleSwipe);
+
+  function done(result) {
+    if (request) {
+      // XXX
+      // Trying this as an inline activity crashes the phone
+      // But as a window activity, calling postResult does not return
+      // to the camera.  So maybe the camera and delete buttons have to do
+      // stuff explicitly.
+      request.postResult(result);
+      request = null;
+    }
+    cleanup();
+  }
+
+  function cleanup() {
+    cameraButton.removeEventListener('click', handleCameraButton);
+    deleteButton.removeEventListener('click', handleDeleteButton);
+    frame.removeEventListener('dbltap', handleDoubleTap);
+    frame.removeEventListener('transform', handleTransform);
+    frame.removeEventListener('pan', handlePan);
+    frame.removeEventListener('swipe', handleSwipe);
+    gestureDetector.stopDetecting();
+    setView(thumbnailListView);
+  }
+
+  function handleCameraButton() {
+    done('done');
+  }
+  function handleDeleteButton() {
+    done('delete');
+  }
+
+  function initPhotoState() {
+    if (!openPhotoState) {
+      console.log('initPhotoState', image.naturalWidth, image.naturalHeight);
+      openPhotoState = new PhotoState(image,
+                                      image.naturalWidth, image.naturalHeight);
+    }
+  }
+
+  function handleDoubleTap(e) {
+    initPhotoState();
+    var scale;
+    if (openPhotoState.fit.scale > openPhotoState.fit.baseScale)
+      scale = openPhotoState.fit.baseScale / openPhotoState.scale;
+    else
+      scale = 2;
+    
+    openPhotoState.zoom(scale, e.detail.clientX, e.detail.clientY, 200);
+  }
+
+  function handleTransform(e) {
+    initPhotoState();
+    openPhotoState.zoom(e.detail.relative.scale,
+                        e.detail.midpoint.clientX,
+                        e.detail.midpoint.clientY);
+  }
+
+  function handlePan(e) {
+    initPhotoState();
+    openPhotoState.pan(event.detail.relative.dx,
+                       event.detail.relative.dy);
+  }
+
+  function handleSwipe(e) {
+    var direction = e.detail.direction;
+    var velocity = e.detail.vy;
+    console.log("swipe", direction, velocity);
+    if (direction === 'down' && velocity > 2)
+      done('done');
+  }
+}
 
 
 //
@@ -856,19 +964,45 @@ function displayImageInFrame(n, frame) {
     return;
   }
 
-  // Asynchronously set the image url
   var imagedata = images[n];
-  photodb.getFile(imagedata.name, function(file) {
+  displayFile(img, imagedata.name, imagedata.width, imagedata.height);
+}
+
+function displayFile(element, filename, width, height) {
+  var container = element.parentNode;
+  console.log("displayFile", element, filename, container);
+
+  // Asynchronously set the image url
+  photodb.getFile(filename, function(file) {
+    console.log("displayFile: got file");
     var url = URL.createObjectURL(file);
-    img.src = url;
-    img.onload = function() { URL.revokeObjectURL(url); };
+    element.src = url;
+    element.onload = function() {
+      console.log("displayFile: image loaded");
+      URL.revokeObjectURL(url);
+
+      // If we didn't know the width or height before, then get them
+      // from the image now, and use that information to position
+      // the image in its container
+      if (!width || !height) {
+        console.log("displayFile: getting fit", 
+                    element.naturalWidth, element.naturalHeight,
+                    container.offsetWidth, container.offsetHeight);
+        var fit = fitImage(element.naturalWidth, element.naturalHeight,
+                           container.offsetWidth, container.offsetHeight);
+        positionImage(element, fit);
+        console.log("displayFile: fit", JSON.stringify(fit));
+      }
+    };
   });
 
-  // Figure out the size and position of the image
-  var fit = fitImage(images[n].metadata.width, images[n].metadata.height,
-                     photoView.offsetWidth, photoView.offsetHeight);
-
-  positionImage(img, fit);
+  // If we know the image size from its metadata, then position it now
+  // even before it is loaded
+  if (width && height) {
+    var fit = fitImage(width, height,
+                       container.offsetWidth, container.offsetHeight);
+    positionImage(element, fit);
+  }
 }
 
 function positionImage(img, fit) {
@@ -1123,8 +1257,8 @@ PhotoState.prototype._reposition = function() {
 PhotoState.prototype.reset = function() {
   // Store the display space we have for photos
   // call reset() when we get a resize or orientationchange event
-  this.viewportWidth = photoFrames.offsetWidth;
-  this.viewportHeight = photoFrames.offsetHeight;
+  this.viewportWidth = this.img.parentNode.offsetWidth;
+  this.viewportHeight = this.img.parentNode.offsetHeight;
 
   // Compute the default size and position of the image
   this.fit = fitImage(this.photoWidth, this.photoHeight,

@@ -24,6 +24,14 @@
       "disposition": "inline",
       "returnValue": true,
       "href": "/index.html#inlineActivity"
+    },
+    "open": {
+      "filters": {
+        "type": "image/jpeg"
+       },
+      "disposition": "window",
+      "returnValue": true,
+      "href": "/index.html"
     }
   },
   "locales": {
