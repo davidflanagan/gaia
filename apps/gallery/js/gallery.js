@@ -125,13 +125,14 @@ var thumbnailSelectView = $('thumbnail-select-view');
 var photoView = $('photo-view');
 var editView = $('edit-view');
 var pickView = $('pick-view');
+var cropView = $('crop-view');
 var openView = $('open-view');
 
 // These are the top-level view objects.
 // This array is used by setView()
 var views = [
   thumbnailListView, thumbnailSelectView, photoView, editView,
-  pickView, openView
+  pickView, cropView, openView
 ];
 var currentView;
 
@@ -479,7 +480,6 @@ function webActivityHandler(activityRequest) {
     case 'browse':
       if (launchedAsInlineActivity)
         return;
-      
       // The 'browse' activity is just the way we launch the app
       // There's nothing else to do here.
       setView(thumbnailListView);
@@ -487,7 +487,6 @@ function webActivityHandler(activityRequest) {
     case 'pick':
       if (!launchedAsInlineActivity)
         return;
-      
       if (pendingPick)
         cancelPick();
       startPick(activityRequest);
@@ -503,23 +502,71 @@ function webActivityHandler(activityRequest) {
 
 var launchedAsInlineActivity = (window.location.hash == '#inlineActivity');
 var pendingPick;
+var pickType;
+var pickWidth, pickHeight;
+var cropURL;
+var cropEditor;
 
 function startPick(activityRequest) {
   pendingPick = activityRequest;
+  pickType = activityRequest.source.data.type;
+  if (pendingPick.source.data.width && pendingPick.source.data.height) {
+    pickWidth = pendingPick.source.data.width;
+    pickHeight = pendingPick.source.data.height;
+  }
+  else {
+    pickWidth = pickHeight = 0;
+  }
   setView(pickView);
 }
 
-function finishPick(filename) {
+function cropPickedImage(fileinfo) {
+  setView(cropView);
+
+  photodb.getFile(fileinfo.name, function(file) {
+    cropURL = URL.createObjectURL(file);
+    cropEditor = new ImageEditor(cropURL, $('crop-frame'), {}, function() {
+      cropEditor.showCropOverlay();
+      if (pickWidth)
+        cropEditor.setCropAspectRatio(pickWidth, pickHeight);
+      else
+        cropEditor.setCropAspectRatio(); // free form cropping
+    });
+  });
+}
+
+function finishPick() {
+  var url;
+  if (pickWidth)
+    url = cropEditor.getCroppedRegionDataURL(pickType, pickWidth, pickHeight);
+  else
+    url = cropEditor.getCroppedRegionDataURL(pickType);
+
   pendingPick.postResult({
     type: 'image/jpeg',
-    filename: filename
+    url: url
   });
-  pendingPick = null;
-  setView(thumbnailListView);
+  cleanupPick();
 }
 
 function cancelPick() {
   pendingPick.postError('pick cancelled');
+  cleanupPick();
+}
+
+function cleanupCrop() {
+  if (cropURL) {
+    URL.revokeObjectURL(cropURL);
+    cropURL = null;
+  }
+  if (cropEditor) {
+    cropEditor.destroy();
+    cropEditor = null;
+  }
+}
+
+function cleanupPick() {
+  cleanupCrop();
   pendingPick = null;
   setView(thumbnailListView);
 }
@@ -667,7 +714,7 @@ thumbnails.addEventListener('click', function thumbnailsClick(evt) {
     updateSelectionState();
   }
   else if (currentView === pickView) {
-    finishPick(images[parseInt(target.dataset.index)].name);
+    cropPickedImage(images[parseInt(target.dataset.index)]);
   }
 });
 
@@ -704,11 +751,22 @@ $('thumbnails-cancel-button').onclick = function() {
   setView(thumbnailListView);
 };
 
-// Clicking on the pick cancel button cancels the pick activity, which sends
-// us back to thumbail list view
-$('pick-cancel-button').onclick = function() {
+// Clicking on the pick back button cancels the pick activity.
+$('pick-back-button').onclick = function() {
   cancelPick();
 };
+
+// In crop view, the back button goes back to pick view
+$('crop-back-button').onclick = function() {
+  setView(pickView);
+  cleanupCrop();
+};
+
+// In crop view, the done button finishes the pick
+$('crop-done-button').onclick = function() {
+  finishPick();
+};
+
 
 // The camera buttons should both launch the camera app
 $('photos-camera-button').onclick =
@@ -823,13 +881,15 @@ $('edit-cancel-button').onclick = function() {
 
 // We get a resize event when the user rotates the screen
 window.addEventListener('resize', function resizeHandler(evt) {
-  // Abandon any current pan or zoom and reset the current photo view
-  photoState.reset();
-  photoState.setFramesPosition();
+  if (currentView === photoView) {
+    // Abandon any current pan or zoom and reset the current photo view
+    photoState.reset();
+    photoState.setFramesPosition();
 
-  // Also reset the size and position of the previous and next photos
-  resetPhoto(currentPhotoIndex - 1, previousPhotoFrame.firstElementChild);
-  resetPhoto(currentPhotoIndex + 1, nextPhotoFrame.firstElementChild);
+    // Also reset the size and position of the previous and next photos
+    resetPhoto(currentPhotoIndex - 1, previousPhotoFrame.firstElementChild);
+    resetPhoto(currentPhotoIndex + 1, nextPhotoFrame.firstElementChild);
+  }
 
   function resetPhoto(n, img) {
     if (!img || n < 0 || n >= images.length)
@@ -965,33 +1025,26 @@ function displayImageInFrame(n, frame) {
   }
 
   var imagedata = images[n];
-  displayFile(img, imagedata.name, imagedata.width, imagedata.height);
+  displayFile(img, imagedata.name,
+              imagedata.metadata.width, imagedata.metadata.height);
 }
 
 function displayFile(element, filename, width, height) {
   var container = element.parentNode;
-  console.log("displayFile", element, filename, container);
-
   // Asynchronously set the image url
   photodb.getFile(filename, function(file) {
-    console.log("displayFile: got file");
     var url = URL.createObjectURL(file);
     element.src = url;
     element.onload = function() {
-      console.log("displayFile: image loaded");
       URL.revokeObjectURL(url);
 
       // If we didn't know the width or height before, then get them
       // from the image now, and use that information to position
       // the image in its container
       if (!width || !height) {
-        console.log("displayFile: getting fit", 
-                    element.naturalWidth, element.naturalHeight,
-                    container.offsetWidth, container.offsetHeight);
         var fit = fitImage(element.naturalWidth, element.naturalHeight,
                            container.offsetWidth, container.offsetHeight);
         positionImage(element, fit);
-        console.log("displayFile: fit", JSON.stringify(fit));
       }
     };
   });
@@ -1004,6 +1057,7 @@ function displayFile(element, filename, width, height) {
     positionImage(element, fit);
   }
 }
+
 
 function positionImage(img, fit) {
   img.style.transform =

@@ -19,7 +19,7 @@
     },
     "pick": {
       "filters": {
-        "type": "image/jpeg"
+        "type": ["image/jpeg", "image/png"]
        },
       "disposition": "inline",
       "returnValue": true,
@@ -29,9 +29,9 @@
       "filters": {
         "type": "image/jpeg"
        },
-      "disposition": "window",
+      "disposition": "inline",
       "returnValue": true,
-      "href": "/index.html"
+      "href": "/index.html#inlineActivity"
     }
   },
   "locales": {
