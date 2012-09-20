@@ -115,7 +115,7 @@ var Camera = {
     this.toggleButton.addEventListener('click', this.toggleCamera.bind(this));
     this.toggleFlashBtn.addEventListener('click', this.toggleFlash.bind(this));
     this.viewfinder.addEventListener('click', this.toggleFilmStrip.bind(this));
-//    this.filmStrip.addEventListener('click', this.filmStripPressed.bind(this));
+
     this.switchButton
       .addEventListener('click', this.toggleModePressed.bind(this));
     this.captureButton
@@ -227,7 +227,6 @@ var Camera = {
   filmStripPressed: function camera_filmStripPressed(e) {
     // Launch the gallery with an open activity to view this specific photo
     var filename = e.target.getAttribute('data-filename');
-    console.log("starting open activity for", filename);
     var a = new MozActivity({
       name: 'open',
       data: {
@@ -236,12 +235,26 @@ var Camera = {
       }
     });
 
+    // XXX: this seems like it should not be necessary
+    function reopen() {
+      navigator.mozApps.getSelf().onsuccess = function getSelfCB(evt) {
+        evt.target.result.launch();
+      };
+    };
+
     a.onerror = function(e) {
-      console.log('open activity error:', a.error.name);
+      reopen();
+      console.warn('open activity error:', a.error.name);
     };
     a.onsuccess = function(e) {
-      console.log('activity success:', a.result);
-    }
+      reopen();
+
+      if (a.result.delete) {
+        // XXX: the user asked to delete this photo, so
+        // delete it from device storage and remove from the filmstrip
+        console.warn('delete feature is not yet implemented');
+      }
+    };
   },
 
   setSource: function camera_setSource(camera) {

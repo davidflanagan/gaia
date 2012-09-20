@@ -239,7 +239,7 @@ function init() {
   // initial view
   if (!navigator.mozHasPendingMessage('activity'))
     setView(thumbnailListView);
-  
+
   // Register a handler for activities
   navigator.mozSetMessageHandler('activity', webActivityHandler);
 }
@@ -412,7 +412,7 @@ function setView(view) {
     pickView.appendChild(thumbnails);
     break;
   default:
-    // In any other view, remove the thumbnails from the document so 
+    // In any other view, remove the thumbnails from the document so
     // they don't show anywhere
     if (thumbnails.parentNode)
       thumbnails.parentNode.removeChild(thumbnails);
@@ -473,7 +473,7 @@ function webActivityHandler(activityRequest) {
       handleActivity();
     });
   }
-    
+
   function handleActivity() {
     var activityName = activityRequest.source.name;
     switch (activityName) {
@@ -585,7 +585,6 @@ window.addEventListener('mozvisiblitychange', function() {
 
 function handleOpenActivity(request) {
   var filename = request.source.data.filename;
-  console.log("handleOpenActivity", filename);
 
   var frame = $('open-frame');
   var image = $('open-image');
@@ -595,9 +594,10 @@ function handleOpenActivity(request) {
   setView(openView);
   displayFile(image, filename);
 
-  var gestureDetector = new GestureDetector(frame).startDetecting();
+  var gestureDetector = new GestureDetector(frame);
   var openPhotoState = null;  // lazily initialized
 
+  gestureDetector.startDetecting();
   cameraButton.addEventListener('click', handleCameraButton);
   deleteButton.addEventListener('click', handleDeleteButton);
   frame.addEventListener('dbltap', handleDoubleTap);
@@ -630,15 +630,14 @@ function handleOpenActivity(request) {
   }
 
   function handleCameraButton() {
-    done('done');
+    done({'delete': false});
   }
   function handleDeleteButton() {
-    done('delete');
+    done({'delete': true});
   }
 
   function initPhotoState() {
     if (!openPhotoState) {
-      console.log('initPhotoState', image.naturalWidth, image.naturalHeight);
       openPhotoState = new PhotoState(image,
                                       image.naturalWidth, image.naturalHeight);
     }
@@ -651,7 +650,7 @@ function handleOpenActivity(request) {
       scale = openPhotoState.fit.baseScale / openPhotoState.scale;
     else
       scale = 2;
-    
+
     openPhotoState.zoom(scale, e.detail.clientX, e.detail.clientY, 200);
   }
 
@@ -664,14 +663,12 @@ function handleOpenActivity(request) {
 
   function handlePan(e) {
     initPhotoState();
-    openPhotoState.pan(event.detail.relative.dx,
-                       event.detail.relative.dy);
+    openPhotoState.pan(e.detail.relative.dx, e.detail.relative.dy);
   }
 
   function handleSwipe(e) {
     var direction = e.detail.direction;
     var velocity = e.detail.vy;
-    console.log("swipe", direction, velocity);
     if (direction === 'down' && velocity > 2)
       done('done');
   }
@@ -869,7 +866,7 @@ function shareFiles(filenames) {
       alert(msg);
     }
     else {
-      console.log('share activity error:', a.error.name);
+      console.warn('share activity error:', a.error.name);
     }
   };
 }
