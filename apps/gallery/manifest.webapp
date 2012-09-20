@@ -23,7 +23,7 @@
        },
       "disposition": "inline",
       "returnValue": true,
-      "href": "/index.html#inlineActivity"
+      "href": "/index.html#pick"
     },
     "open": {
       "filters": {
@@ -31,7 +31,7 @@
        },
       "disposition": "inline",
       "returnValue": true,
-      "href": "/index.html#inlineActivity"
+      "href": "/index.html#open"
     }
   },
   "locales": {

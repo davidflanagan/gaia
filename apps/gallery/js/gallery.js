@@ -500,7 +500,8 @@ function webActivityHandler(activityRequest) {
   }
 }
 
-var launchedAsInlineActivity = (window.location.hash == '#inlineActivity');
+var launchedAsInlineActivity =
+  window.location.hash === '#pick' || window.location.hash === '#open';
 var pendingPick;
 var pickType;
 var pickWidth, pickHeight;
