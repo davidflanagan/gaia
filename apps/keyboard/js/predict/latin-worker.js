@@ -549,11 +549,12 @@ var PredictiveText = {
     var wordList = [];
     if (_currentWord.length > 0) {
       var candidates = Predict(_currentWord);
-      var capitalize = _currentWord[0] === _currentWord[0].toUpperCase();
+      var capitalize = (_currentWord[0] === _currentWord[0].toUpperCase());
       for (var n = 0, len = candidates.length; n < len; ++n) {
         var word = candidates[n].word;
-        if (capitalize)
+        if (capitalize) {
           word = word[0].toUpperCase() + word.substring(1);
+        }
 
         // For some reason ../render.js expects two copies here.
         // It displays the first one, but actually inserts the second one.
