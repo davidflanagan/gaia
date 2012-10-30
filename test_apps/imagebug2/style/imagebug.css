@@ -1,0 +1,35 @@
+/* these styles are just copied from the gallery app */
+
+#thumbnails {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  margin: 0;
+  overflow-y: scroll;
+  overflow-x: hidden;
+  /* Cheating! Due to margins to the right, a row of 3 thumbnails is be thicker than 100% */
+  width: 104%;
+}
+
+.thumbnail {
+  width: 106px;
+  height: 106px;
+  margin-right: 1px;
+  margin-bottom: 1px;
+  padding: 0;
+  /* default to left-to-right, but overridden for rtl languages below */
+  float: left;
+  /* no list item bullets */
+  list-style-type: none;
+  /* don't let the user select the items */
+  -moz-user-select: none;
+  /* thumbnail images will be displayed with background-image */
+  /* these properties scale and position the images correctly */
+  background-size: cover;        /* allow some cropping */
+  background-position: center;   /* keep the cropping at the edges */
+  background-repeat: no-repeat;
+  background-image: url("test.jpg");
+}
