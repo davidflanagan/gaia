@@ -117,7 +117,6 @@ def main():
     parser.add_option(      "--ftu", help="specify the ftu manifest URL")
     parser.add_option("-c", "--console", help="indicate if the console should be enabled", action="store_true")
     parser.add_option("-o", "--output", help="specify the name of the output file")
-    parser.add_option("-w", "--wallpaper", help="specify the name of the wallpaper file")
     parser.add_option("-v", "--verbose", help="increase output verbosity", action="store_true")
     parser.add_option(      "--noftu", help="bypass the ftu app")
     (options, args) = parser.parse_args(sys.argv[1:])
@@ -139,17 +138,11 @@ def main():
     else:
         settings_filename = "profile/settings.json"
 
-    if options.wallpaper:
-        wallpaper_filename = options.wallpaper
-    else:
-        wallpaper_filename = "build/wallpaper.jpg"
-
     if verbose:
         print "Console:", options.console
         print "Homescreen URL:", homescreen_url
         print "Ftu URL:", ftu_url
         print "Setting Filename:",settings_filename
-        print "Wallpaper Filename:", wallpaper_filename
 
     # Set the default console output
     if options.console:
@@ -161,11 +154,6 @@ def main():
     # Set the ftu manifest URL
     if not options.noftu:
         settings["ftu.manifestURL"] = ftu_url
-
-    # Grab wallpaper.jpg and convert it into a base64 string
-    wallpaper_file = open(wallpaper_filename, "rb")
-    wallpaper_base64 = base64.b64encode(wallpaper_file.read())
-    settings["wallpaper.image"] = "data:image/jpeg;base64," + wallpaper_base64.decode("utf-8")
 
     # Grab ringer_classic_prism.ogg and convert it into a base64 string
     ringtone_name = "shared/resources/media/ringtones/ringer_classic_prism.ogg"

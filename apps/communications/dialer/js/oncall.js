@@ -55,10 +55,14 @@ var CallScreen = {
   },
 
   setCallerContactImage: function cs_setCallerContactImage(image_url, force) {
-    var photoURL;
-    var isString = (typeof image_url == 'string');
-    photoURL = isString ? image_url : URL.createObjectURL(image_url);
     if (!this.mainContainer.style.backgroundImage || force) {
+      var photoURL;
+      var isString = (typeof image_url == 'string');
+      photoURL = isString ? image_url : URL.createObjectURL(image_url);
+      var oldurl = this.mainContainer.style.backgroundImage;
+      if (oldurl.slice(4,9) === 'blob:') {
+        URL.revokeObjectURL(oldurl.slice(4,-1));
+      }
       this.mainContainer.style.backgroundImage = 'url(' + photoURL + ')';
     }
   },
@@ -625,7 +629,8 @@ window.addEventListener('localized', function callSetup(evt) {
   if (navigator.mozSettings && !isLocked) {
     var req = navigator.mozSettings.createLock().get('wallpaper.image');
     req.onsuccess = function cs_wi_onsuccess() {
-      CallScreen.setCallerContactImage(req.result['wallpaper.image']);
+      var blob = req.result['wallpaper.image'];
+      CallScreen.setCallerContactImage(blob);
     };
   }
 });

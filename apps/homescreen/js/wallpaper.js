@@ -13,17 +13,20 @@ const Wallpaper = (function() {
       }
     });
     a.onsuccess = function onWallpaperSuccess() {
-      if (!a.result.blob)
+      if (!a.result.blob) {
+        console.warn('Pick activity did not return a blob');
         return;
-
-      var reader = new FileReader();
-      reader.readAsDataURL(a.result.blob);
-      reader.onload = function() {
-        navigator.mozSettings.createLock().set({
-          'wallpaper.image': reader.result
-        });
       }
+
+      var setrequest = navigator.mozSettings.createLock().set({
+        'wallpaper.image': a.result.blob
+      });
+
+      setrequest.onerror = function onSetError() {
+        console.warn('failed to set wallpaper', setrequest.error);
+      };
     };
+
     a.onerror = function onWallpaperError() {
       console.warn('pick failed!');
     };

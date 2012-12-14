@@ -146,6 +146,12 @@ var LockScreen = {
     }
 
     var self = this;
+
+    Wallpaper.addListener(function(url) {
+      self.updateBackground(url);
+      self.overlay.classList.remove('uninit');
+    });
+
     SettingsListener.observe('lockscreen.enabled', true, function(value) {
       self.setEnabled(value);
     });
@@ -159,13 +165,6 @@ var LockScreen = {
       self.airplaneMode = value;
       self.updateConnState();
     });
-
-    SettingsListener.observe('wallpaper.image',
-                             'resources/images/backgrounds/default.png',
-                             function(value) {
-                               self.updateBackground(value);
-                               self.overlay.classList.remove('uninit');
-                             });
 
     SettingsListener.observe(
       'lockscreen.passcode-lock.code', '0000', function(value) {
