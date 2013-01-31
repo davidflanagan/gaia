@@ -3,6 +3,129 @@
 
 'use strict';
 
+/*
+Ideas to improve gallery startup time:
+
+add logging output for DOMContentLoaded, load, etc.  Maybe a
+mutation observer to listen for scripts and register onload
+handlers for them?
+   done: shared/js/startup_timing.js
+
+make sure scripts are before stylesheets.  Check time difference
+   doesn't seem to make much difference. Maybe because of deferred scripts?
+
+edit build/webapp-optimize.js to aggregate js files and see what
+difference that makes
+   surprisingly little difference. I've turned this off again.
+
+move stuff from localized to content loaded. Get rid of the hidden body
+stuff, since there is no localized text on the main screen of gallery
+   it doesn't seem like this will make any real difference.
+   DOMContentLoaded is only 7.5ms before the localized event
+
+start db init in the first (non-deferred) script.  Or at least
+start a query for the top 12 thumbnails in the first script.
+
+If I'm going to start mediadb before the onload event, I've got to
+be careful because the event handlers (scanstart, etc.) need the DOM defined. 
+(a whenLoaded(f) metafunction?)
+ 
+Start taking features out until full startup... Don't load the
+editor code or the mediaframe code, e.g. until we've drawn the
+screen.  Will have to be careful about event handlers and calling
+code before it is loaded.
+
+What would happen if mediadb used a worker thread for scanning or even
+for metadata parsing?
+
+Problems with mediadb.js:
+
+   the fact that the class has an enumerate method with db parameters
+   (as used by the music app) means that new records really need to be
+   inserted into the db before they are passed through to the 
+   created event handler.  Otherwise the app could have a model of
+   the fs that was different than the state of the db.
+
+   I could fix that by using the db only as a persistant store
+   for the records, but doing all the indexing and enumeration on
+   an in-memory copy of file and metadata records.  (Note that we
+   could still have the addMetadata() method to save data, but just not
+   the db query methods.)
+
+   Or, I could fix it (for the gallery app) by just getting rid of
+     the fancy enumeration options.  Then I might not even need 
+     indexeddb. It might be enough just to store an array of records
+     as a single entry in asyncStorage.  
+
+     TEST this: how long does it take to read and write my entire
+     files[] array in the gallery app? And do the blobs survive the
+     round trip?
+
+   Another problem: the startup logic for mediadb kind of assumes that
+     the UI is ready first. If we get onunavailable, we need to 
+     the document to be ready so we can display the overlay. If we get
+     onchanged, we need to display the new thing.  
+
+   So, if I wasn't using mediadb for the gallery app, how would I
+   start up?
+
+      1) At the top of the first (non-deferred) script, start a query
+         for the first page of records, with the hope that the query
+         will return by the time we get DOMContentLoaded. Since this
+         query returns the most recent known files, we can use the
+         date of the first for the scan.
+         
+         (If the records are stored in a regular indexeddb with each
+         record a separate object instead of storing a single array of
+         records, then I could use mozGetAll() to query as long as
+         there was an index by date.)
+
+      2) Query the rest of the records.  (If using indexeddb with each
+         record a separate entry in the db, then maybe this plus the
+         above is all one query, using mozGetAll repeatedly, but with
+         the hope of at least having the 12 most recent photos and
+         videos known ASAP.) Otherwise, maybe querying the rest of the
+         records just reads a couple of giant objects.
+
+      3) Start scanning for new files, using the date from above. We
+         wait until the enumeration of existing files is complete because
+         this gives us an easier way to distinguish new from changed
+         files. (And also allows us to do a full scan by just checking
+         known files to ensure they still exist instead of scanning
+         them all again.)
+
+         Note that in the first run case, the queries in 1+2 should 
+         return quickly, so we should get to the scan quickly.
+
+         As new files are found, metadata parsing is done as currently.
+
+      4) In all of the steps above, all we are doing is building an
+         array of fileinfo objects. There is no UI involved, so this
+         can be done before DOMContentLoaded
+
+      5) Once we do get DOMContentLoaded, we want to get thumbnails 
+         on the screen ASAP. So we grab the set of records we
+         know about so far, register an event handler to get ones that
+         are still coming display all we can.
+
+   To do this with mediadb, we'd change it so that it maintains an
+   in-memory copy of the data, and it starts building its model of
+   the filesystem as fast as it can as soon as it is created, with
+   no need to explictly call enumerate or scan.  And then totally
+   simplify the scan logic.
+         
+   Could I also change it to support multiple device storage objects 
+   or would I still do that in gallery itself? If the library
+   handled multiple storage types, then gallery wouldn't have to
+   maintain its own files[] array. 
+   
+         
+         
+
+*/
+
+
+
 // TODO
 // fix edit mode
 
@@ -351,6 +474,7 @@ function initDB(include_videos) {
       // Hide the scanning indicator
       $('progress').classList.add('hidden');
       $('throbber').classList.remove('throb');
+      console.startup("Scanning complete");
     }
   };
 
@@ -400,6 +524,8 @@ function initThumbnails() {
     return;
   }
 
+  console.startup("initThumbnails()");
+
   // Keep track of when thumbnails are onscreen and offscreen
   visibilityMonitor =
     monitorChildVisibility(thumbnails,
@@ -427,6 +553,8 @@ function initThumbnails() {
 
   // This is called when we have all the photos and all the videos
   function mergeAndCreateThumbnails() {
+    console.startup("got all db records");
+
     // Sort both batches of files by date
     photos.sort(compareFilesByDate);
     videos.sort(compareFilesByDate);
@@ -469,6 +597,8 @@ function initThumbnails() {
     // really have a way to properly handle scan results while enumerating
     // the thumbnails, so now we just enumerate as fast as we can and then
     // start scanning for new results.
+    console.startup("starting scan");
+
     scan();
   }
 }
@@ -590,6 +720,11 @@ function fileCreated(fileinfo) {
   if (currentView === fullscreenView) {
     showFile(currentFileIndex);
   }
+
+  if (files.length === 12) {
+    console.startup("displayed first 12 files");
+  }
+
 }
 
 // Assuming that array is sorted according to comparator, return the
