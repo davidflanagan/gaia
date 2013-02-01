@@ -60,6 +60,16 @@ Problems with mediadb.js:
      TEST this: how long does it take to read and write my entire
      files[] array in the gallery app? And do the blobs survive the
      round trip?
+        
+       saving 1000 records takes 30s!  (probably makes copies of all the blobs)
+       Even reading them back takes 1 or 2 seconds, so this is too long.
+       (stringified length of files[] is 213kb, but that doesn't count blobs)
+
+       I need to use indexeddb with mozGetAll() indexed by date
+
+       if I just save 15 records, I can read them back in 100-200ms
+       (the very first test too 800, but I haven't been able to repeat that)
+
 
    Another problem: the startup logic for mediadb kind of assumes that
      the UI is ready first. If we get onunavailable, we need to 
@@ -99,9 +109,19 @@ Problems with mediadb.js:
 
          As new files are found, metadata parsing is done as currently.
 
+         It is important that we can report the files before they are
+         commited to the database.  If I could write the records from
+         oldest to newest, then if the write didn't complete, the next
+         scan would find all of the files that hadn't been saved.
+
+         So don't write anything back to the db until scanning is done.
+
       4) In all of the steps above, all we are doing is building an
          array of fileinfo objects. There is no UI involved, so this
          can be done before DOMContentLoaded
+         (Note the internal array of records will include those with
+          fail:true that should be ignored. I'll want to not pass those
+          on to the client).
 
       5) Once we do get DOMContentLoaded, we want to get thumbnails 
          on the screen ASAP. So we grab the set of records we
@@ -119,7 +139,27 @@ Problems with mediadb.js:
    handled multiple storage types, then gallery wouldn't have to
    maintain its own files[] array. 
    
-         
+   what if the new mediadb was called medialist and it exported a
+   linked list of fileinfo records?  (No, finding the right insertion
+   position for new files would be inefficient. Would have to use a 
+   binary tree. Easier to resize an array, I think).
+
+   How do I handle the transition from unattended self-initialization
+   to registering callbacks on DOMContentLoaded?  Does the gallery app
+   just have to manually check the state and array of files and then
+   register callbacks for updates?  Is it simpler if there is just a
+   single onchange callback which, when registered sends initial state?
+   That would be a nice API for gallery, so I don't have to handle 
+   two separate cases (already inited by the time we get domcontentloaded
+   vs not initialized yet).
+
+   if the new mediadb is going to maintain its state in memory, it is
+   going to have a filename->data map because the scanning code will
+   need that to query whether a given file is already known or not.
+   
+   That means that we could just pass the filename around in change
+   events, and querying the metadata for that file would be quick.
+   
          
 
 */
