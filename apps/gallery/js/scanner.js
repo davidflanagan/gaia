@@ -20,6 +20,7 @@ var Scanner = (function() {
     this.state = Scanner.READY;
     this.scanning = 0;
     this.pendingDBUpdates = [];
+    this.pendingNotifications = null;
     initDB(scanner);
   }
 
@@ -267,7 +268,7 @@ var Scanner = (function() {
               break;
           }
           if (e.reason === 'modified')
-            addFile(scanner, kind, filename);
+            addFileByName(scanner, kind, filename);
           else
             removeFile(scanner, filename);
           break;
@@ -292,79 +293,57 @@ var Scanner = (function() {
     }
   }
 
+  function addFileByName(scanner, kind, filename) {
+    var storage = scanner.media[kind].storage;
+    storage.get(filename).onsuccess = function(e) {
+      var file = e.target.result;
+      addFile(scanner, kind, file, function() { persist(); });
+    };
+  }
+
   // This updates the scanner state in memory and notifies the client.
   // It then updates the database, or, if we're scanning, queues the update.
   // This function should be useful for change events and scan results.
-  function addFile(scanner, kind, fileOrName) {
-    var file, filename;
-    if (typeof fileOrName === 'string') {
-      filename = fileOrName;
-      file = null;
-    }
-    else {
-      file = fileOrName
-      filename = file.name;
-    }
+  function addFile(scanner, kind, file, callback) {
+    var filename = file.name;
 
     // If we already know about this file, then first delete the known file
     if (scanner.data[filename]) {
       removeFile(scanner, filename);
     }
 
-    var storage = scanner.media[kind].storage;
-    if (file) {
-      add(file)
+    if (ignore(scanner, file))
+      return;
+
+    var fileinfo = {
+      name: file.name,
+      kind: kind,
+      type: file.type,
+      size: file.size,
+      date: file.lastModifiedDate.getTime()
+    };
+
+    var metadataParser = scanner.media[kind].metadataParser;
+    metadataParser(file, metadataSuccess, metadataError);
+
+    function metadataError(msg) {
+      // If metadata parsing fails, ignore the file. Don't put it in 
+      // our files[] array, don't save it to the db, and don't notify
+      // the client app about it. As long as there is a newer file with
+      // good metadata, we'll never scan the broken file again.
+      console.warn('MediaDB: error parsing metadata for', filename, ':', e);
+      if (callback)
+        callback();
     }
-    else {
-      storage.get(filename).onsuccess = function(e) {
-        add(e.target.result);
-      };
-    }
 
-    function add(file) {
-      if (ignore(scanner, file))
-        return;
-      var fileinfo = {
-        name: file.name,
-        type: file.type,
-        size: file.size,
-        date: file.lastModifiedDate ?
-          file.lastModifiedDate.getTime() :
-          Date.now()
-        kind: kind
-      };
-
-      // XXX: parse metadata here before we do more
-      // Does that need to be serialized (through a worker)?
-      // The code should work if completely parallel, but I wonder
-      // if memory usage would spike if I tried to do lots at once.
-      // (especially the image decoding).
-
-
-      // XXX: 
-      // Once metadata parsing is done we may have files that fail it.
-      // If a file has the .fail property, then we don't want it in the
-      // files[] array.  But we still want it in the data object so we
-      // know it exists?
-      // XXX: actually, maybe not. With the new scan new/verify old 
-      // scanning system, a file that fails will not be rescanned unless
-      // there are no newer files.  So maybe we can just ignore failures
-      // and get rid of that special case.
-      // 
+    function metadataSuccess(metadata) {
+      fileinfo.metadata = metadata;
       scanner.data[filename] = fileinfo;
       var pos = insertNewFile(scanner, fileinfo);
       notify(scanner, 'insert', fileinfo, pos);
-
-      if (scanner.scanning) {
-        scanner.pendingDBUpdates.push(fileinfo);
-      }
-      else {
-        var txn = scanner.db.transaction('files', 'readwrite');
-        txn.objectStore('files').put(fileinfo);
-        txn.oncomplete = function() {
-          fileinfo.persisted = true; // It has been written 
-        };
-      }
+      scanner.pendingDBUpdates.push(fileinfo);
+      if (callback)
+        callback();
     }
   }
 
@@ -523,9 +502,12 @@ var Scanner = (function() {
       cursor.onsuccess = function() {
         var file = cursor.result;
         if (file) {
-          if (!ignore(scanner, kind, file))
-            addFile(scanner, kind, file);
-          cursor.continue();
+          if (ignore(scanner, kind, file)) {
+            cursor.continue();
+          }
+          else {
+            addFile(scanner, kind, file, function() { cursor.continue(); });
+          }
         }
         else {
           // We're done scanning for new files. Now we have to verify
@@ -618,36 +600,47 @@ var Scanner = (function() {
     scanner.pendingDBUpdates.length = 0;
   }
 
+  function notify(scanner, type, arg1, arg2) {
+    if (scanner.callback) {
+      try {
+        scanner.callback(type, arg1, arg2);
+      }
+      catch (e) {
+        console.warn('Scanner:', type, 'callback threw', e);
+      }
+    }
+    else {
+      if (!scanner.pendingNotifications)
+        scanner.pendingNotifications = [];
+      scanner.pendingNotifications.push(type, arg1, arg2);
+    }
+  }
+
+  function changeState(scanner, state) {
+    if (scanner.state !== state) {
+      scanner.state = state;
+      if (state === Scanner.READY)
+        notify(scanner, 'ready');
+      else
+        notify(scanner, 'unavailable', state);
+    }
+  }
+
+
   Scanner.prototype = {
-    close: function close() {
-      // Close the database
-      this.db.close();
+    setCallback: function(callback) {
+      // send all the pending notifications to this callback
+      if (this.pendingNotifications) {
+        for(var i = 0; i < this.pendingNotifications.length; i += 3) {
+          callback(this.pendingNotifications[i], 
+                   this.pendingNotifications[i+1], 
+                   this.pendingNotifications[i+2]);
+        }
+        this.pendingNotifications = null;
+      }
 
-      // There is no way to close device storage, but we at least want
-      // to stop receiving events from it.
-      this.storage.removeEventListener('change', this.details.dsEventListener);
-
-      // Change state and send out an event
-      changeState(this, Scanner.CLOSED);
-    },
-
-    addEventListener: function addEventListener(type, listener) {
-      if (!this.details.eventListeners.hasOwnProperty(type))
-        this.details.eventListeners[type] = [];
-      var listeners = this.details.eventListeners[type];
-      if (listeners.indexOf(listener) !== -1)
-        return;
-      listeners.push(listener);
-    },
-
-    removeEventListener: function removeEventListener(type, listener) {
-      if (!this.details.eventListeners.hasOwnProperty(type))
-        return;
-      var listeners = this.details.eventListeners[type];
-      var position = listeners.indexOf(listener);
-      if (position === -1)
-        return;
-      listeners.splice(position, 1);
+      // All future notifications will go directly to this callback
+      this.callback = callback;
     },
 
     // Look up the specified filename in DeviceStorage and pass the
@@ -791,159 +784,6 @@ var Scanner = (function() {
     },
 
 
-    // Enumerate all files in the filesystem, sorting by the specified
-    // property (which must be one of the indexes, or null for the filename).
-    // Direction is ascending or descending. Use whatever string
-    // constant IndexedDB uses.  f is the function to pass each record to.
-    //
-    // Each record is an object like this:
-    //
-    // {
-    //    // The basic fields are all from the File object
-    //    name: // the filename
-    //    type: // the file type
-    //    size: // the file size
-    //    date: // file mod time
-    //    metadata: // whatever object the metadata parser returns
-    // }
-    //
-    // This method returns an object that you can pass to cancelEnumeration()
-    // to cancel an enumeration in progress. You can use the state property
-    // of the returned object to find out the state of the enumeration. It
-    // should be one of the strings 'enumerating', 'complete', 'cancelling'
-    // 'cancelled', or 'error'
-    //
-    enumerate: function enumerate(key, range, direction, callback) {
-      if (this.state !== Scanner.READY)
-        throw Error('Scanner is not ready. State: ' + this.state);
-
-      var handle = { state: 'enumerating' };
-
-      // The first three arguments are optional, but the callback
-      // is required, and we don't want to have to pass three nulls
-      if (arguments.length === 1) {
-        callback = key;
-        key = undefined;
-      }
-      else if (arguments.length === 2) {
-        callback = range;
-        range = undefined;
-      }
-      else if (arguments.length === 3) {
-        callback = direction;
-        direction = undefined;
-      }
-
-      var store = this.db.transaction('files').objectStore('files');
-
-      // If a key other than "name" is specified, then use the index for that
-      // key instead of the store.
-      if (key && key !== 'name')
-        store = store.index(key);
-
-      // Now create a cursor for the store or index.
-      var cursorRequest = store.openCursor(range || null, direction || 'next');
-
-      cursorRequest.onerror = function() {
-        console.error('Scanner.enumerate() failed with', cursorRequest.error);
-        handle.state = 'error';
-      };
-
-      cursorRequest.onsuccess = function() {
-        // If the enumeration has been cancelled, return without
-        // calling the callback and without calling cursor.continue();
-        if (handle.state === 'cancelling') {
-          handle.state = 'cancelled';
-          return;
-        }
-
-        var cursor = cursorRequest.result;
-        if (cursor) {
-          try {
-            if (!cursor.value.fail)   // if metadata parsing succeeded
-              callback(cursor.value);
-          }
-          catch (e) {
-            console.warn('Scanner.enumerate(): callback threw', e);
-          }
-          cursor.continue();
-        }
-        else {
-          // Final time, tell the callback that there are no more.
-          handle.state = 'complete';
-          callback(null);
-        }
-      };
-
-      return handle;
-    },
-
-    // This method takes the same arguments as enumerate(), but batches
-    // the results into an array and passes them to the callback all at
-    // once when the enumeration is complete. It uses enumerate() so it
-    // is no faster than that method, but may be more convenient.
-    enumerateAll: function enumerateAll(key, range, direction, callback) {
-      var batch = [];
-
-      // The first three arguments are optional, but the callback
-      // is required, and we don't want to have to pass three nulls
-      if (arguments.length === 1) {
-        callback = key;
-        key = undefined;
-      }
-      else if (arguments.length === 2) {
-        callback = range;
-        range = undefined;
-      }
-      else if (arguments.length === 3) {
-        callback = direction;
-        direction = undefined;
-      }
-
-      return this.enumerate(key, range, direction, function(fileinfo) {
-        if (fileinfo !== null)
-          batch.push(fileinfo);
-        else
-          callback(batch);
-      });
-    },
-
-    // Cancel a pending enumeration. After calling this the callback for
-    // the specified enumeration will not be invoked again.
-    cancelEnumeration: function cancelEnumeration(handle) {
-      if (handle.state === 'enumerating')
-        handle.state = 'cancelling';
-    },
-
-    // Use the non-standard mozGetAll() function to return all of the
-    // records in the database in one big batch. The records will be
-    // sorted by filename
-    getAll: function getAll(callback) {
-      if (this.state !== Scanner.READY)
-        throw Error('Scanner is not ready. State: ' + this.state);
-
-      var store = this.db.transaction('files').objectStore('files');
-      var request = store.mozGetAll();
-      request.onerror = function() {
-        console.error('Scanner.getAll() failed with', request.error);
-      };
-      request.onsuccess = function() {
-        var all = request.result;  // All records in the object store
-
-        // Filter out files that failed metadata parsing
-        var good = all.filter(function(fileinfo) { return !fileinfo.fail; });
-
-        callback(good);
-      };
-    },
-
-    // Scan for new or deleted files.
-    // This is only necessary if you have explicitly disabled automatic
-    // scanning by setting autoscan:false in the options object.
-    scan: function() {
-      scan(this);
-    },
-
     // Use the device storage freeSpace() method and pass the returned
     // value to the callback.
     freeSpace: function freeSpace(callback) {
@@ -957,613 +797,5 @@ var Scanner = (function() {
     }
   };
 
-
-
-  /* Details of helper functions follow */
-
-
-  // Tell the db to start a manual scan. I think we don't do
-  // this automatically from the constructor, but most apps will start
-  // a scan right after calling the constructor and then will proceed to
-  // enumerate what is already in the db. If scan performance is bad
-  // for large media collections, apps can just have the user specify
-  // when to rescan rather than doing it automatically. Until we have
-  // change event notifications, gaia apps might want to do a scan
-  // every time they are made visible.
-  //
-  // Filesystem changes discovered by a scan are generally
-  // batched. If a scan discovers 10 new files, the information
-  // about those files will generally be passed as an array to a the
-  // onchange handler rather than calling that handler once for each
-  // newly discovered file.  Apps can decide whether to handle
-  // batches by processing each element individually or by just starting
-  // fresh with a new call to enumerate().
-  //
-  // Scan details are not tightly specified, but the goal is to be
-  // as efficient as possible.  We'll try to do a quick date-based
-  // scan to look for new files and report those first. Following
-  // that, a full scan will be compared with a full dump of the DB
-  // to see if any files have been deleted.
-  //
-  function scan(scanner) {
-    scanner.scanning = true;
-    notify(scanner, 'scanstart');
-
-    // First, scan for new files since the last scan, if there was one
-    // When the quickScan is done it will begin a full scan.  If we don't
-    // have a last scan date, then the database is empty and we don't
-    // have to do a full scan, since there will be no changes or deletions.
-    quickScan(scanner.details.newestFileModTime);
-
-    // Do a quick scan and then follow with a full scan
-    function quickScan(timestamp) {
-      var cursor;
-      if (timestamp > 0) {
-        scanner.details.firstscan = false;
-        cursor = scanner.storage.enumerate(scanner.directory, {
-          // add 1 so we don't find the same newest file again
-          since: new Date(timestamp + 1)
-        });
-      }
-      else {
-        // If there is no timestamp then this is the first time we've
-        // scanned and we don't have any files in the database, which
-        // allows important optimizations during the scanning process
-        scanner.details.firstscan = true;
-        scanner.details.records = [];
-        cursor = scanner.storage.enumerate(scanner.directory);
-      }
-
-      cursor.onsuccess = function() {
-        var file = cursor.result;
-        if (file) {
-          if (!ignore(scanner, file))
-            insertRecord(scanner, file);
-          cursor.continue();
-        }
-        else {
-          // Quick scan is done. When the queue is empty, force out
-          // any batched created events and move on to the slower
-          // more thorough full scan.
-          whenDoneProcessing(scanner, function() {
-            sendNotifications(scanner);
-            if (scanner.details.firstscan) {
-              // If this was the first scan, then we're done
-              endscan(scanner);
-            }
-            else {
-              // If this was not the first scan, then we need to go
-              // ensure that all of the old files we know about are still there
-              fullScan();
-            }
-          });
-        }
-      };
-
-      cursor.onerror = function() {
-        // We can't scan if we can't read device storage.
-        // Perhaps the card was unmounted or pulled out
-        console.warning('Error while scanning', cursor.error);
-        endscan(scanner);
-      };
-    }
-
-    // Get a complete list of files from DeviceStorage
-    // Get a complete list of files from IndexedDB.
-    // Sort them both (the indexedDB list will already be sorted)
-    // Step through the lists noting deleted files and created files.
-    // Pay attention to files whose size or date has changed and
-    // treat those as deletions followed by insertions.
-    // Sync up the database while stepping through the lists.
-    function fullScan() {
-      if (scanner.state !== Scanner.READY) {
-        endscan(scanner);
-        return;
-      }
-
-      // The db may be busy right about now, processing files that
-      // were found during the quick scan.  So we'll start off by
-      // enumerating all files in device storage
-      var dsfiles = [];
-      var cursor = scanner.storage.enumerate(scanner.directory);
-      cursor.onsuccess = function() {
-        var file = cursor.result;
-        if (file) {
-          if (!ignore(scanner, file)) {
-            dsfiles.push(file);
-          }
-          cursor.continue();
-        }
-        else {
-          // We're done enumerating device storage, so get all files from db
-          getDBFiles();
-        }
-      }
-
-      cursor.onerror = function() {
-        // We can't scan if we can't read device storage.
-        // Perhaps the card was unmounted or pulled out
-        console.warning('Error while scanning', cursor.error);
-        endscan(scanner);
-      };
-
-      function getDBFiles() {
-        var store = scanner.db.transaction('files').objectStore('files');
-        var getAllRequest = store.mozGetAll();
-
-        getAllRequest.onsuccess = function() {
-          var dbfiles = getAllRequest.result;  // Should already be sorted
-          compareLists(dbfiles, dsfiles);
-        };
-      }
-
-      function compareLists(dbfiles, dsfiles) {
-        // The dbfiles are sorted when we get them from the db.
-        // But the ds files are not sorted
-        dsfiles.sort(function(a, b) {
-          if (a.name < b.name)
-            return -1;
-          else
-            return 1;
-        });
-
-        // Loop through both the dsfiles and dbfiles lists
-        var dsindex = 0, dbindex = 0;
-        while (true) {
-          // Get the next DeviceStorage file or null
-          var dsfile;
-          if (dsindex < dsfiles.length)
-            dsfile = dsfiles[dsindex];
-          else
-            dsfile = null;
-
-          // Get the next DB file or null
-          var dbfile;
-          if (dbindex < dbfiles.length)
-            dbfile = dbfiles[dbindex];
-          else
-            dbfile = null;
-
-          // Case 1: both files are null.  If so, we're done.
-          if (dsfile === null && dbfile === null)
-            break;
-
-          // Case 2: no more files in the db.  This means that
-          // the file from ds is a new one
-          if (dbfile === null) {
-            insertRecord(scanner, dsfile);
-            dsindex++;
-            continue;
-          }
-
-          // Case 3: no more files in ds. This means that the db file
-          // has been deleted
-          if (dsfile === null) {
-            deleteRecord(scanner, dbfile.name);
-            dbindex++;
-            continue;
-          }
-
-          // Case 4: two files with the same name.
-          // 4a: date and size are the same for both: do nothing
-          // 4b: file has changed: it is both a deletion and a creation
-          if (dsfile.name === dbfile.name) {
-            var lastModified = dsfile.lastModifiedDate;
-            if ((lastModified && lastModified.getTime() !== dbfile.date) ||
-                dsfile.size !== dbfile.size) {
-              deleteRecord(scanner, dbfile.name);
-              insertRecord(scanner, dsfile);
-            }
-            dsindex++;
-            dbindex++;
-            continue;
-          }
-
-          // Case 5: the dsfile name is less than the dbfile name.
-          // This means that the dsfile is new.  Like case 2
-          if (dsfile.name < dbfile.name) {
-            insertRecord(scanner, dsfile);
-            dsindex++;
-            continue;
-          }
-
-          // Case 6: the dsfile name is greater than the dbfile name.
-          // this means that the dbfile no longer exists on disk
-          if (dsfile.name > dbfile.name) {
-            deleteRecord(scanner, dbfile.name);
-            dbindex++;
-            continue;
-          }
-
-          // That should be an exhaustive set of possiblities
-          // and we should never reach this point.
-          console.error('Assertion failed');
-        }
-
-        // Push a special value onto the queue so that when it is
-        // processed we can trigger a 'scanend' event
-        insertRecord(scanner, null);
-      }
-    }
-  }
-
-
-  // Pass in a file, or a filename.  The function queues it up for
-  // metadata parsing and insertion into the database, and will send a
-  // Scanner change event (possibly batched with other changes).
-  // Ensures that only one file is being parsed at a time, but tries
-  // to make as many db changes in one transaction as possible.  The
-  // special value null indicates that scanning is complete.  If the
-  // 2nd argument is a File, it should come from enumerate() so that
-  // the name property does not include the directory prefix.  If it
-  // is a name, then the directory prefix must already have been
-  // stripped.
-  function insertRecord(scanner, fileOrName) {
-    var details = scanner.details;
-
-    // Add this file to the queue of files to process
-    details.pendingInsertions.push(fileOrName);
-
-    // If the queue is already being processed, just return
-    if (details.processingQueue)
-      return;
-
-    // Otherwise, start processing the queue.
-    processQueue(scanner);
-  }
-
-  // Delete the database record associated with filename.
-  // filename must not include the directory prefix.
-  function deleteRecord(scanner, filename) {
-    var details = scanner.details;
-
-    // Add this file to the queue of files to process
-    details.pendingDeletions.push(filename);
-
-    // If there is already a transaction in progress return now.
-    if (details.processingQueue)
-      return;
-
-    // Otherwise, start processing the queue
-    processQueue(scanner);
-  }
-
-  function whenDoneProcessing(scanner, f) {
-    var details = scanner.details;
-    if (details.processingQueue)
-      details.whenDoneProcessing.push(f);
-    else
-      f();
-  }
-
-  function processQueue(scanner) {
-    var details = scanner.details;
-
-    details.processingQueue = true;
-
-    // Now get one filename off a queue and store it
-    next();
-
-    // Take an item from a queue and process it.
-    // Deletions are always processed before insertions because we want
-    // to clear away non-functional parts of the UI ASAP.
-    function next() {
-      if (details.pendingDeletions.length > 0) {
-        deleteFiles();
-      }
-      else if (details.pendingInsertions.length > 0) {
-        insertFile(details.pendingInsertions.shift());
-      }
-      else {
-        details.processingQueue = false;
-        if (details.whenDoneProcessing.length > 0) {
-          var functions = details.whenDoneProcessing;
-          details.whenDoneProcessing = [];
-          functions.forEach(function(f) { f(); });
-        }
-      }
-    }
-
-    // Delete all of the pending files in a single transaction
-    function deleteFiles() {
-      var transaction = scanner.db.transaction('files', 'readwrite');
-      var store = transaction.objectStore('files');
-
-      deleteNextFile();
-
-      function deleteNextFile() {
-        if (details.pendingDeletions.length === 0) {
-          next();
-          return;
-        }
-        var filename = details.pendingDeletions.shift();
-        var request = store.delete(filename);
-        request.onerror = function() {
-          // This probably means that the file wasn't in the db yet
-          console.warn('Scanner: Unknown file in deleteRecord:',
-                       filename, getreq.error);
-          deleteNextFile();
-        };
-        request.onsuccess = function() {
-          // We succeeded, so remember to send out an event about it.
-          queueDeleteNotification(scanner, filename);
-          deleteNextFile();
-        };
-      }
-    }
-
-    // Insert a file into the db. One transaction per insertion.
-    // The argument might be a filename or a File object
-    // If it is a File, then it came from enumerate and its name
-    // property already has the directory stripped off.  If it is a
-    // filename, it came from a device storage change event and we
-    // stripped of the directory before calling insertRecord.
-    function insertFile(f) {
-      // null is a special value pushed on to the queue when a scan()
-      // is complete.  We use it to trigger a scanend event
-      // after all the change events from the scan are delivered
-      if (f === null) {
-        sendNotifications(scanner);
-        endscan(scanner);
-        next();
-        return;
-      }
-
-      // If we got a filename, look up the file in device storage
-      if (typeof f === 'string') {
-        var getreq = scanner.storage.get(scanner.directory + f);
-        getreq.onerror = function() {
-          console.warn('Scanner: Unknown file in insertRecord:',
-                       scanner.directory + f, getreq.error);
-          next();
-        };
-        getreq.onsuccess = function() {
-          parseMetadata(getreq.result, f);
-        };
-      }
-      else {
-        // otherwise f is the file we want
-        parseMetadata(f, f.name);
-      }
-    }
-
-    function parseMetadata(file, filename) {
-      if (!file.lastModifiedDate) {
-        console.warn('Scanner: parseMetadata: no lastModifiedDate for',
-                     filename,
-                     'using Date.now() until #793955 is fixed');
-      }
-
-      // Basic information about the file
-      var fileinfo = {
-        name: filename, // we can't trust file.name
-        type: file.type,
-        size: file.size,
-        date: file.lastModifiedDate ?
-          file.lastModifiedDate.getTime() :
-          Date.now()
-      };
-
-      if (fileinfo.date > details.newestFileModTime)
-        details.newestFileModTime = fileinfo.date;
-
-      // Get metadata about the file
-      scanner.metadataParser(file, gotMetadata, metadataError);
-      function metadataError(e) {
-        console.warn('Scanner: error parsing metadata for',
-                     filename, ':', e);
-        // If we get an error parsing the metadata, assume it is invalid
-        // and make a note in the fileinfo record that we store in the database
-        // If we don't store it in the database, we'll keep finding it
-        // on every scan. But we make sure never to return the invalid file
-        // on an enumerate call.
-        fileinfo.fail = true;
-        storeRecord(fileinfo);
-      }
-      function gotMetadata(metadata) {
-        fileinfo.metadata = metadata;
-        storeRecord(fileinfo);
-      }
-    }
-
-    function storeRecord(fileinfo) {
-      if (scanner.details.firstscan) {
-        // If this is the first scan then we know this is a new file and
-        // we can assume that adding it to the db will succeed.
-        // So we can just queue a notification about the new file without
-        // waiting for a db operation.
-        scanner.details.records.push(fileinfo);
-        if (!fileinfo.fail) {
-          queueCreateNotification(scanner, fileinfo);
-        }
-        // And go on to the next
-        next();
-      }
-      else {
-        // If this is not the first scan, then we may already have a db
-        // record for this new file. In that case, the call to add() above
-        // is going to fail. We need to handle that case, so we can't send
-        // out the new file notification until we get a response to the add().
-        var transaction = scanner.db.transaction('files', 'readwrite');
-        var store = transaction.objectStore('files');
-        var request = store.add(fileinfo);
-
-        request.onsuccess = function() {
-          // Remember to send an event about this new file
-          if (!fileinfo.fail)
-            queueCreateNotification(scanner, fileinfo);
-          // And go on to the next
-          next();
-        };
-        request.onerror = function(event) {
-          // If the error name is 'ConstraintError' it means that the
-          // file already exists in the database. So try again, using put()
-          // instead of add(). If that succeeds, then queue a delete
-          // notification along with the insert notification.  If the
-          // second try fails, or if the error was something different
-          // then issue a warning and continue with the next.
-          if (request.error.name === 'ConstraintError') {
-            // Don't let the higher-level DB error handler report the error
-            event.stopPropagation();
-            // And don't spew a default error message to the console either
-            event.preventDefault();
-            var putrequest = store.put(fileinfo);
-            putrequest.onsuccess = function() {
-              queueDeleteNotification(scanner, fileinfo.name);
-              if (!fileinfo.fail)
-                queueCreateNotification(scanner, fileinfo);
-              next();
-            };
-            putrequest.onerror = function() {
-              // Report and move on
-              console.error('Scanner: unexpected ConstraintError',
-                            'in insertRecord for file:', fileinfo.name);
-              next();
-            };
-          }
-          else {
-            // Something unexpected happened!
-            // All we can do is report it and move on
-            console.error('Scanner: unexpected error in insertRecord:',
-                          request.error, 'for file:', fileinfo.name);
-            next();
-          }
-        };
-      }
-    }
-  }
-
-  // Don't send out notification events right away. Wait a short time to
-  // see if others arrive that we can batch up.  This is common for scanning
-  function queueCreateNotification(scanner, fileinfo) {
-    var creates = scanner.details.pendingCreateNotifications;
-    creates.push(fileinfo);
-    if (scanner.batchSize && creates.length >= scanner.batchSize)
-      sendNotifications(scanner);
-    else
-      resetNotificationTimer(scanner);
-  }
-
-  function queueDeleteNotification(scanner, filename) {
-    var deletes = scanner.details.pendingDeleteNotifications;
-    deletes.push(filename);
-    if (scanner.batchSize && deletes.length >= scanner.batchSize)
-      sendNotifications(scanner);
-    else
-      resetNotificationTimer(scanner);
-  }
-
-  function resetNotificationTimer(scanner) {
-    var details = scanner.details;
-    if (details.pendingNotificationTimer)
-      clearTimeout(details.pendingNotificationTimer);
-    details.pendingNotificationTimer =
-      setTimeout(function() { sendNotifications(scanner); },
-                 scanner.batchHoldTime);
-  }
-
-  // Send out notifications for creations and deletions
-  function sendNotifications(scanner) {
-    var details = scanner.details;
-    if (details.pendingNotificationTimer) {
-      clearTimeout(details.pendingNotificationTimer);
-      details.pendingNotificationTimer = null;
-    }
-    if (details.pendingDeleteNotifications.length > 0) {
-      var deletions = details.pendingDeleteNotifications;
-      details.pendingDeleteNotifications = [];
-      notify(scanner, 'deleted', deletions);
-    }
-
-    if (details.pendingCreateNotifications.length > 0) {
-
-      // If this is a first scan, and we have records that are not
-      // in the db yet, write them to the db now
-      if (details.firstscan && details.records.length > 0) {
-        var transaction = scanner.db.transaction('files', 'readwrite');
-        var store = transaction.objectStore('files');
-        for (var i = 0; i < details.records.length; i++)
-          store.add(details.records[i]);
-        details.records.length = 0;
-      }
-
-      var creations = details.pendingCreateNotifications;
-      details.pendingCreateNotifications = [];
-      notify(scanner, 'created', creations);
-    }
-  }
-
-  function notify(scanner, type, arg1, arg2) {
-    if (scanner.callback) {
-      try {
-        scanner.callback(type, arg1, arg2);
-      }
-      catch (e) {
-        console.warn('Scanner:', type, 'callback threw', e);
-      }
-    }
-    else {
-      if (!scanner.pendingCallbacks)
-        scanner.pendingCallbacks = [];
-      scanner.pendingCallbacks.push(type, detail);
-    }
-  }
-
-    var handler = scanner['on' + type];
-    var listeners = scanner.details.eventListeners[type];
-
-    // Return if there is nothing to handle the event
-    if (!handler && (!listeners || listeners.length == 0))
-      return;
-
-    // We use a fake event object
-    var event = {
-      type: type,
-      target: scanner,
-      currentTarget: scanner,
-      timestamp: Date.now(),
-      detail: detail
-    };
-
-    // Call the 'on' handler property if there is one
-    if (typeof handler === 'function') {
-      try {
-        handler.call(scanner, event);
-      }
-      catch (e) {
-        console.warn('Scanner: ', 'on' + type, 'event handler threw', e);
-      }
-    }
-
-    // Now call the listeners if there are any
-    if (!listeners)
-      return;
-    for (var i = 0; i < listeners.length; i++) {
-      try {
-        var listener = listeners[i];
-        if (typeof listener === 'function') {
-          listener.call(scanner, event);
-        }
-        else {
-          listener.handleEvent(event);
-        }
-      }
-      catch (e) {
-        console.warn('Scanner: ', type, 'event listener threw', e);
-      }
-    }
-  }
-
-  function changeState(scanner, state) {
-    if (scanner.state !== state) {
-      scanner.state = state;
-      if (state === Scanner.READY)
-        notify(scanner, 'ready');
-      else
-        notify(scanner, 'unavailable', state);
-    }
-  }
-
   return Scanner;
-
 }());
