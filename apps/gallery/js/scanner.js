@@ -11,6 +11,7 @@
 var Scanner = (function() {
 
   function Scanner(name, version, media) {
+    console.startup('Scanner() constructor');
     this.dbname = 'Scanner-' + name;
     this.version = version;
     this.media = media;
@@ -165,6 +166,7 @@ var Scanner = (function() {
 
     // This is called when we've got the database open and ready.
     openRequest.onsuccess = function(e) {
+      console.startup('Scanner db open');
       scanner.db = openRequest.result;
 
       // Log any errors that propagate up to here
@@ -202,19 +204,28 @@ var Scanner = (function() {
       if (cursor) {
         fileinfo = cursor.value;
         fileinfo.persisted = true; // we know it is in the db
-        files.push(fileinfo);
-        data[fileinfo.name] = fileinfo;
-        if (scanner.callback && !fileinfo.fail)
-          scanner.callback('append', fileinfo);
+        scanner.files.push(fileinfo);
+        scanner.data[fileinfo.name] = fileinfo;
+        if (scanner.files.length <= 12)
+          console.startup('Enumerated ' + scanner.files.length);
+        if (scanner.callback) {
+          try {
+            scanner.callback('append', fileinfo);
+          }
+          catch(e) {
+            console.warn('Scanner: enumeration callback threw', e);
+          }
+        }
+        cursor.continue();
       }
       else {
+        console.startup('Scanner enumeration complete');
         initDeviceStorage(scanner);
       }
     }
   }
 
   function initDeviceStorage(scanner) {
-
     // If there is more than one device storage object we're going to use
     // we only want available/unavailable events from one of them, so 
     // only pass true to the first init.
@@ -459,6 +470,7 @@ var Scanner = (function() {
   }
 
   function scan(scanner) {
+    console.startup('beginning scan');
     var firstscan = scanner.files.length === 0;
     var timestamp = firstscan ? 0 : scanner.files[0].date;
 
@@ -507,6 +519,8 @@ var Scanner = (function() {
           }
           else {
             addFile(scanner, kind, file, function() { cursor.continue(); });
+            console.startup('scan ' + kind + ' ' +
+                            scanner.pendingDBUpdates.length);
           }
         }
         else {
@@ -520,6 +534,7 @@ var Scanner = (function() {
     // Loop through the files that are unverified and of this kind
     // and verify that they still exist in the specified device storage
     function verify(kind, storage) {
+      console.startup('Starting verify for ' + kind);
       verifyNextFile(0);
       function verifyNextFile(n) {
         while(n < scanner.files.length) {
@@ -557,6 +572,7 @@ var Scanner = (function() {
         }
         
         // When we exit the loop, we're done with scanning for this storage
+        console.startup('Ending verify for ' + kind);
         endscan(scanner);
       }
     }
@@ -573,12 +589,18 @@ var Scanner = (function() {
       scanner.scanning--;
       if (scanner.scanning === 0) {  // If the last scan is done
         notify(scanner, 'scanend');
+        console.startup('Done scanning');
         persist(scanner);
       }
     }
   }
 
   function persist(scanner) {
+    if (scanner.pendingDBUpdates.length === 0)
+      return;
+
+    console.startup('saving scan results to db');
+
     // Scan results are saved to the db in a single transaction. So if
     // anything goes wrong and it fails, everything should fail and
     // the next time the app starts we should be back in the same
@@ -598,6 +620,10 @@ var Scanner = (function() {
       }
     }
     scanner.pendingDBUpdates.length = 0;
+
+    txn.oncomplete = function() {
+      console.startup('scan results saved');
+    }
   }
 
   function notify(scanner, type, arg1, arg2) {
@@ -649,7 +675,14 @@ var Scanner = (function() {
       if (this.state !== Scanner.READY)
         throw Error('Scanner is not ready. State: ' + this.state);
 
-      var getRequest = this.storage.get(this.directory + filename);
+      var fileinfo = this.data[filename];
+      if (!fileinfo)
+        throw Error('Scanner: unknown file: ' + filename);
+
+      var kind = fileinfo.kind;
+      var storage = this.media[kind].storage;
+
+      var getRequest = storage.get(filename);
       getRequest.onsuccess = function() {
         callback(getRequest.result);
       };
@@ -666,11 +699,13 @@ var Scanner = (function() {
     // This will cause a device storage change event, which will cause
     // Scanner to remove the file from the database and send out a
     // Scanner change event, which will notify the application UI.
-    deleteFile: function deleteFile(filename) {
+    deleteFile: function deleteFile(kind, filename) {
       if (this.state !== Scanner.READY)
         throw Error('Scanner is not ready. State: ' + this.state);
 
-      this.storage.delete(this.directory + filename).onerror = function(e) {
+      var storage = this.media[kind].storage;
+
+      storage.delete(filename).onerror = function(e) {
         console.error('Scanner.deleteFile(): Failed to delete', filename,
                       'from DeviceStorage:', e.target.error);
       };
@@ -682,18 +717,19 @@ var Scanner = (function() {
     // will cause Scanner to add the file to its database, and that will
     // send out a Scanner event to the application UI.
     //
-    addFile: function addFile(filename, file) {
+    addFile: function addFile(kind, filename, file) {
       if (this.state !== Scanner.READY)
         throw Error('Scanner is not ready. State: ' + this.state);
 
+      var storage = this.media[kind].storage;
       var scanner = this;
 
       // Delete any existing file by this name, then save the file.
-      var deletereq = scanner.storage.delete(scanner.directory + filename);
+      var deletereq = storage.delete(filename);
       deletereq.onsuccess = deletereq.onerror = save;
 
       function save() {
-        var request = scanner.storage.addNamed(file, scanner.directory + filename);
+        var request = storage.addNamed(file, filename);
         request.onerror = function() {
           console.error('Scanner: Failed to store', filename,
                         'in DeviceStorage:', storeRequest.error);
@@ -701,98 +737,18 @@ var Scanner = (function() {
       }
     },
 
-    // Look up the database record for the named file, and copy the properties
-    // of the metadata object into the file's metadata, and then write the
-    // updated record back to the database. The third argument is optional. If
-    // you pass a function, it will be called when the metadata is written.
-    updateMetadata: function(filename, metadata, callback) {
-      if (this.state !== Scanner.READY)
-        throw Error('Scanner is not ready. State: ' + this.state);
-
-      var scanner = this;
-
-      // First, look up the fileinfo record in the db
-      var read = scanner.db.transaction('files', 'readonly')
-        .objectStore('files')
-        .get(filename);
-
-      read.onerror = function() {
-        console.error('Scanner.updateMetadata called with unknown filename');
-      };
-
-      read.onsuccess = function() {
-        var fileinfo = read.result;
-
-        // Update the fileinfo metadata
-        Object.keys(metadata).forEach(function(key) {
-          fileinfo.metadata[key] = metadata[key];
-        });
-
-        // And write it back into the database.
-        var write = scanner.db.transaction('files', 'readwrite')
-          .objectStore('files')
-          .put(fileinfo);
-
-        write.onerror = function() {
-          console.error('Scanner.updateMetadata: database write failed',
-                        write.error && write.error.name);
-        };
-
-        if (callback) {
-          write.onsuccess = function() {
-            callback();
-          }
-        }
-      }
-    },
-
-    // Count the number of records in the database and pass that number to the
-    // specified callback. key is 'name', 'date' or one of the index names
-    // passed to the constructor. range is be an IDBKeyRange that defines a
-    // the range of key values to count.  key and range are optional
-    // arguments.  If one argument is passed, it is the callback. If two
-    // arguments are passed, they are assumed to be the range and callback.
-    count: function(key, range, callback) {
-      if (this.state !== Scanner.READY)
-        throw Error('Scanner is not ready. State: ' + this.state);
-
-      // range is an optional argument
-      if (arguments.length === 1) {
-        callback = key;
-        range = undefined;
-        key = undefined;
-      }
-      else if (arguments.length === 2) {
-        callback = range;
-        range = key;
-        key = undefined;
-      }
-
-      var store = this.db.transaction('files').objectStore('files');
-      if (key && key !== 'name')
-        store = store.index(key);
-
-      var countRequest = store.count(range || null);
-
-      countRequest.onerror = function() {
-        console.error('Scanner.count() failed with', countRequest.error);
-      };
-
-      countRequest.onsuccess = function(e) {
-        callback(e.target.result);
-      };
-    },
-
-
     // Use the device storage freeSpace() method and pass the returned
     // value to the callback.
     freeSpace: function freeSpace(callback) {
       if (this.state !== Scanner.READY)
         throw Error('Scanner is not ready. State: ' + this.state);
 
-      var freereq = this.storage.freeSpace();
-      freereq.onsuccess = function() {
-        callback(freereq.result);
+      for(var kind in this.media) {
+        this.media[kind].storage.freeSpace().onsuccess = function(e) {
+          callback(e.target.result);
+        };
+        // Just do this for one of our DeviceStorage objects
+        break;
       }
     }
   };
