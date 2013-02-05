@@ -19,6 +19,7 @@ var Scanner = (function() {
     this.callback = null;
     this.state = Scanner.READY;
     this.scanning = 0;
+    this.pendingDBUpdates = [];
     initDB(scanner);
   }
 
@@ -36,6 +37,96 @@ var Scanner = (function() {
   Scanner.READY = 'ready';         // Scanner is available and ready for use
   Scanner.NOCARD = 'nocard';       // Unavailable because there is no sd card
   Scanner.UNMOUNTED = 'unmounted'; // Unavailable because card unmounted
+
+  /*
+    Init sequence:
+    
+    The constructor calls initDB
+
+    initDB opens the database and asynchronously calls enumerateDB when done
+
+    enumerateDB uses a cursor to enumerate all entries in the db in
+    reverse chronological order and stores them in the files[] array. If
+    a callback is registered, it calls the cb with type 'append' for
+    each entry.  (If no callback is registered it does not queue the 
+    notifications but assumes the the client will start with the files[] 
+    array and listen for updates to it.)  When enumeration is complete
+    it calls initDeviceStorage.
+
+    initDeviceStorage synchronously obtains a device storage object
+    for each kind of media storage it needs and registers an device
+    storage change event handler for each. It asynchronously queries
+    one of the device storage objects to find out if there is actually
+    a usable sdcard and sends appropriate events if there is not. But
+    before waiting for the result of the availability check it calls
+    scan() to begin scanning the device storage objects.
+
+    scan():
+     - marks all files in the files[] array as unverified
+     - calls the async function scanOneKind for each kind of device storage
+
+    scanOneKind():
+
+      - if we're not already scanning, send a 'scanstart' notification
+        and increments the pending scans counter
+
+      - creates a device storage cursor to enumerate one kind of media
+        files. If there is at least one known file, it only looks for
+        files that are newer. If a directory was specified it only 
+        enumerates that directory.
+      
+      - as files are found, they are passed to the addFile() function
+
+      - when the enumeration is done, scanOneKind() calls verify()
+
+    verify() is called to verify that all of the files in the files[]
+    array that are of one particular kind of media and that were in
+    the files[] array before the scan started still exist in the
+    device storage for that kind of media. If it finds a file that no
+    longer exists, it calls removeFile().  When all unverified files
+    of that kind have been verified or removed, it calls endscan() to
+    decrement the pending scan counter.
+
+    endscan() decrements the pending scan counter and when it reaches
+    zero, it knows that the concurrent scan of each of the device
+    storage areas is complete.  It sends a 'scanend' notification and
+    then calls persist()
+
+    persist(): This function updates the db to match
+    the current state of the files[] array. If addFile() and
+    removeFile() are called for device storage changes, they write the
+    change to the db right away. But when called during a scan, they
+    just append to a pendingDBUpdates array. The persist() function
+    uses this array.
+    
+    removeFile(): this function is called when we get a device storage
+    notification that a file has been deleted or when the scanning
+    process detects that a file has been deleted. It removes the file
+    from scanner's files[] array and data object, then sends a
+    'delete' notification.  If a scan is in process, it remembers the
+    deleted file so the db can be updated when the scan is done. If no
+    scan is in process, it starts an async db delete, but returns
+    immediately.
+
+    addFile(): this is called when we get a device storage
+    notification that a new file has been created or when scanning
+    finds a new file.  These are actually quite different cases... ds
+    notifications just give us a filename, and we then have to look up
+    the actual file in ds. But when scanning, we get the File object
+    directly. So this function can be called with a string or a File.
+    In the non-scanning case, it asynchronously looks up the File and
+    asynchronously saves the new fileinfo record to the db (but
+    returns before that transaction completes.)  In the scanning case,
+    it doesn't have to look up the file and just queues the fileinfo
+    record to be persisted later, so it is much less async in this
+    case.  In both cases, however, it has to do asynchronous metadata
+    parsing in order to construct the fileinfo record for the file.
+
+    Needs a callback argument to synchronize scan with metdata parsing.
+
+   */
+
+
 
   function initDB(scanner) {
     // Open the database
@@ -269,7 +360,7 @@ var Scanner = (function() {
       }
       else {
         var txn = scanner.db.transaction('files', 'readwrite');
-        txn.objectStore('files').add(fileinfo);
+        txn.objectStore('files').put(fileinfo);
         txn.oncomplete = function() {
           fileinfo.persisted = true; // It has been written 
         };
@@ -286,6 +377,8 @@ var Scanner = (function() {
     // If we don't already know about this file, ignore it
     if (!fileinfo)
       return;
+
+    delete scanner.data[filename];
 
     var pos = scanner.files.indexOf(fileinfo);
     if (pos !== -1) {
@@ -360,7 +453,7 @@ var Scanner = (function() {
   }
 
   //
-  // Return true if media db should ignore this file.
+  // Return true if scanner should ignore this file.
   //
   // If any components of the path begin with a . we'll ignore the file.
   // The '.' prefix indicates hidden files and directories on Unix and
@@ -498,12 +591,32 @@ var Scanner = (function() {
       scanner.scanning--;
       if (scanner.scanning === 0) {  // If the last scan is done
         notify(scanner, 'scanend');
-        // XXX: If we found any new or deleted files, persist them now.
-        // XXX: should we send the event before that? I think so.
+        persist(scanner);
       }
     }
   }
 
+  function persist(scanner) {
+    // Scan results are saved to the db in a single transaction. So if
+    // anything goes wrong and it fails, everything should fail and
+    // the next time the app starts we should be back in the same
+    // place... We'll redo the scan and try saving again.
+    var txn = scanner.db.transaction('files', 'readwrite');
+    var store = txn.objectStore('files');
+
+    for(var i = 0; i < scanner.pendingDBUpdates.length; i++) {
+      var update = scanner.pendingDBUpdates[i];
+      if (typeof update === 'string') {
+        // we're deleting a named file
+        store.delete(update);
+      }
+      else {
+        // we're inserting a fileinfo object
+        store.put(update);
+      }
+    }
+    scanner.pendingDBUpdates.length = 0;
+  }
 
   Scanner.prototype = {
     close: function close() {
