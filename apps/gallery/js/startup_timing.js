@@ -1,5 +1,5 @@
 (function() {
-
+/*
   var start = performance.timing.navigationStart;
 
   function time(msg) {
@@ -39,6 +39,8 @@
       }
     });
   }
-  
+
   console.startup = time;
+*/  
+  console.startup = function() {};
 }());

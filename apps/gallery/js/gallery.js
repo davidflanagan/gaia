@@ -242,10 +242,11 @@ var editBgImageButtons =
 // element, and video player controls within the div, and you can refer to
 // those as currentFrame.image and currentFrame.video.player and
 // currentFrame.video.controls.
+/*
 var previousFrame = new MediaFrame($('frame1'));
 var currentFrame = new MediaFrame($('frame2'));
 var nextFrame = new MediaFrame($('frame3'));
-
+*/
 // When this variable is set to true, we ignore any user gestures
 // so we don't try to pan or zoom during a frame transition.
 var transitioning = false;
@@ -279,6 +280,11 @@ window.addEventListener('localized', function showBody() {
 document.addEventListener('DOMContentLoaded', init);
 
 function init() {
+  setView(thumbnailListView);
+  initThumbnails();
+/*
+ * the rest of the function commented out for startup tests
+ *
   // Clicking on the back button goes back to the thumbnail view
   $('fullscreen-back-button').onclick = setView.bind(null, thumbnailListView);
 
@@ -388,12 +394,6 @@ function init() {
   currentFrame.container.addEventListener('transitionend', removeTransition);
   nextFrame.container.addEventListener('transitionend', removeTransition);
 
-  setView(thumbnailListView);
-  initThumbnails();
-
-/*
- * activity stuff commented out for now
- *
   // If we were not invoked by an activity, then start off in thumbnail
   // list mode, and fire up the image and video mediadb objects.
   if (!navigator.mozHasPendingMessage('activity')) {
@@ -577,9 +577,10 @@ function initThumbnails() {
   // Now that the thumbnails are created, we can start handling clicks
   thumbnails.onclick = thumbnailClickHandler;
   
+/*
   // And we can dismiss the spinner overlay
   $('spinner-overlay').classList.add('hidden');
-  
+*/  
   scanner.setCallback(scannerCallback);
 }
 
@@ -890,6 +891,8 @@ function createThumbnail(imagenum) {
   // background image style. This means that we don't keep
   // images decoded if we don't need them.
   li.dataset.backgroundImage = 'url("' + url + '")';
+  if (scanner.files.length === 12)
+    console.log("Twelve thumbnails in:", Date.now() - performance.timing.navigationStart);
   return li;
 }
 
