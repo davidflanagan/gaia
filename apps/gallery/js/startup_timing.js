@@ -1,5 +1,4 @@
 (function() {
-/*
   var start = performance.timing.navigationStart;
 
   function time(msg) {
@@ -31,7 +30,6 @@
         if (newnode instanceof HTMLLinkElement && newnode.rel === 'stylesheet')
           time("inserted stylesheet <link>" + newnode.href);
         else if (newnode instanceof HTMLScriptElement) {
-          time("inserted <script> " + newnode.src);
           newnode.addEventListener('load', function() {
             time("loaded script " + newnode.src);
           });
@@ -41,6 +39,4 @@
   }
 
   console.startup = time;
-*/  
-  console.startup = function() {};
 }());
