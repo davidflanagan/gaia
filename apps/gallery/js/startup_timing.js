@@ -3,7 +3,7 @@
   var start = performance.timing.navigationStart;
 
   function time(msg) {
-    dump('Startup ' + (Date.now() - start) + ' ' + msg + '\n');
+    console.log('Startup ' + (Date.now() - start) + ' ' + msg + '\n');
   }
 
   function timeEvent(target, type) {

@@ -253,13 +253,6 @@ var transitioning = false;
 // This will be set to "ltr" or "rtl" when we get our localized event
 var languageDirection;
 
-// This array holds information about all the image and video files we
-// know about. Each array element is an object that includes a
-// filename and metadata. The array is initially filled when we enumerate
-// the photo and video databases, and has elements added and removed when
-// we receive create and delete events from the media databases.
-var files = [];
-
 var currentFileIndex = 0;       // What file is currently displayed
 
 // In thumbnailSelectView, we allow the user to select thumbnails.
@@ -267,10 +260,6 @@ var currentFileIndex = 0;       // What file is currently displayed
 // names to the corresponding File objects
 var selectedFileNames = [];
 var selectedFileNamesToBlobs = {};
-
-// The MediaDB objects that manage the filesystem and the database of metadata
-// See init()
-var photodb, videodb;
 
 var visibilityMonitor;
 
@@ -285,12 +274,9 @@ window.addEventListener('localized', function showBody() {
 
   // <body> children are hidden until the UI is translated
   document.body.classList.remove('hidden');
-
-  // Now initialize the rest of the app. But don't re-initialize if the user
-  // switches languages when the app is already running
-  if (!photodb)
-    init();
 });
+
+document.addEventListener('DOMContentLoaded', init);
 
 function init() {
   // Clicking on the back button goes back to the thumbnail view
@@ -402,6 +388,12 @@ function init() {
   currentFrame.container.addEventListener('transitionend', removeTransition);
   nextFrame.container.addEventListener('transitionend', removeTransition);
 
+  setView(thumbnailListView);
+  initThumbnails();
+
+/*
+ * activity stuff commented out for now
+ *
   // If we were not invoked by an activity, then start off in thumbnail
   // list mode, and fire up the image and video mediadb objects.
   if (!navigator.mozHasPendingMessage('activity')) {
@@ -431,8 +423,10 @@ function init() {
       break;
     }
   });
+*/
 }
 
+/*
 // Initialize MediaDB objects for photos and videos, and set up their
 // event handlers.
 function initDB(include_videos) {
@@ -545,6 +539,7 @@ function compareFilesByDate(a, b) {
     return -1;
   return 0;
 }
+*/
 
 //
 // Enumerate existing entries in the photo and video databases in reverse
@@ -556,6 +551,7 @@ function compareFilesByDate(a, b) {
 // session or an sdcard replacement.
 //
 function initThumbnails() {
+/*
   // If we've already been called once, then we've already got thumbnails
   // displayed. There is no need to re-enumerate them, so we just go
   // straight to scanning for new files
@@ -563,7 +559,7 @@ function initThumbnails() {
     scan();
     return;
   }
-
+*/
   console.startup("initThumbnails()");
 
   // Keep track of when thumbnails are onscreen and offscreen
@@ -573,80 +569,72 @@ function initThumbnails() {
                            thumbnailOnscreen,   // set background image
                            thumbnailOffscreen); // remove background image
 
-  var photos, videos;
-  photodb.getAll(function(records) {
-    photos = records;
-    if (videos)
-      mergeAndCreateThumbnails();
-  });
-
-  if (videodb) {
-    videodb.getAll(function(records) {
-      videos = records;
-      if (photos)
-        mergeAndCreateThumbnails();
-    });
+  for(var i = 0; i < scanner.files.length; i++) {
+    thumbnails.appendChild(createThumbnail(i));
   }
-  else {
-    videos = [];
-  }
+  console.startup('displayed initial ' + scanner.files.length + ' files');
 
-  // This is called when we have all the photos and all the videos
-  function mergeAndCreateThumbnails() {
-    console.startup("got all db records");
-
-    // Sort both batches of files by date
-    photos.sort(compareFilesByDate);
-    videos.sort(compareFilesByDate);
-
-    // Now merge the two arrays into files[], maintaining sort order
-    var numPhotos = photos.length;
-    var numVideos = videos.length;
-    var p = 0, v = 0;
-    while (p < numPhotos || v < numVideos) {
-      if (v >= numVideos) {          // If no more videos
-        files.push(photos[p++]);     // Add the next photo
-      }
-      else if (p >= numPhotos) {     // If no more photos
-        files.push(videos[v++]);     // Add the next video
-      }
-      else {                         // Otherwise, add the newer one
-        if (photos[p].date >= videos[v].date) {
-          files.push(photos[p++]);
-        }
-        else {
-          files.push(videos[v++]);
-        }
-      }
-      // Create and display a thumbnail for the file we just added
-      thumbnails.appendChild(createThumbnail(files.length - 1));
-    }
-
-    // Now that the thumbnails are created, we can start handling clicks
-    thumbnails.onclick = thumbnailClickHandler;
-
-    // And we can dismiss the spinner overlay
-    $('spinner-overlay').classList.add('hidden');
-
-    // But if we didn't find any files, put up the no files overlay
-    if (files.length === 0) {
-      showOverlay('emptygallery');
-    }
-
-    // Scan for new files. We used to start a scan right away but we don't
-    // really have a way to properly handle scan results while enumerating
-    // the thumbnails, so now we just enumerate as fast as we can and then
-    // start scanning for new results.
-    console.startup("starting scan");
-
-    scan();
-  }
+  // Now that the thumbnails are created, we can start handling clicks
+  thumbnails.onclick = thumbnailClickHandler;
+  
+  // And we can dismiss the spinner overlay
+  $('spinner-overlay').classList.add('hidden');
+  
+  scanner.setCallback(scannerCallback);
 }
 
-function scan() {
-  photodb.scan();
-  if (videodb)
-    videodb.scan();
+function scannerCallback(type, detail, position) {
+  switch(type) {
+  case 'append': // fileinfo, pos
+    // We get these notifications during the initial enumeration of the db
+    // We always get them in order, so we can just append a new thumbnail
+    thumbnails.appendChild(createThumbnail(position));
+    break;
+
+  case 'insert': // fileinfo, pos
+    // We get these notifications when a new file is created or discovered
+    // during scanning. They may not be in order
+    thumbnails.insertBefore(createThumbnail(position),
+                            thumbnails.children[position]);
+    if (currentOverlay === 'emptygallery')
+      showOverlay(null);
+    break;
+
+  case 'delete': // fileinfo, pos
+    // We get these notifications when a scan discovers a file has been deleted
+    // or when we get a device storage event about a deleted file
+    thumbnails.removeChild(thumbnails.children[position]);
+    if (scanner.files.length === 0)
+      showOverlay(emptygallery);
+    break;
+
+  case 'scanstart':
+    // Show the scanning indicator
+    $('progress').classList.remove('hidden');
+    $('throbber').classList.add('throb');
+    break;
+
+  case 'scanend':
+    // Hide the scanning indicator
+    $('progress').classList.add('hidden');
+    $('throbber').classList.remove('throb');
+    if (scanner.files.length === 0)
+      showOverlay('emptygallery');
+    break;
+
+  case 'unavailable': // state
+    if (detail === Scanner.NOCARD)
+      showOverlay('nocard');
+    else if (detail === Scanner.UNMOUNTED)
+      showOverlay('pluggedin');
+    break;
+
+  case 'ready':
+    // Hide the nocard or pluggedin overlay if it is displayed
+    if (currentOverlay === 'nocard' || currentOverlay === 'pluggedin')
+      showOverlay(null);
+    break;
+  }
 }
 
 function fileDeleted(filename) {
@@ -893,7 +881,7 @@ function createThumbnail(imagenum) {
   li.dataset.index = imagenum;
   li.classList.add('thumbnail');
 
-  var fileinfo = files[imagenum];
+  var fileinfo = scanner.files[imagenum];
   // We revoke this url in imageDeleted
   var url = URL.createObjectURL(fileinfo.metadata.thumbnail);
 

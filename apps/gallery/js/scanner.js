@@ -22,7 +22,7 @@ var Scanner = (function() {
     this.scanning = 0;
     this.pendingDBUpdates = [];
     this.pendingNotifications = null;
-    initDB(scanner);
+    initDB(this);
   }
 
   // This is the version number of the Scanner schema. If we change this
@@ -133,8 +133,8 @@ var Scanner = (function() {
   function initDB(scanner) {
     // Open the database
     // Note that the user can upgrade the version and we can upgrade the version
-    var openRequest = indexedDB.open(this.dbname,
-                                     this.version * Scanner.VERSION);
+    var openRequest = indexedDB.open(scanner.dbname,
+                                     scanner.version * Scanner.VERSION);
 
     // This should never happen for Gaia apps
     openRequest.onerror = function(e) {
@@ -190,7 +190,7 @@ var Scanner = (function() {
   // With mozGetAll, though, I'll have to create an index on the negative
   // of the file mod time so they're in the right order.
   function enumerateDB(scanner) {
-    var request = this.db.transaction('files')
+    var request = scanner.db.transaction('files')
       .objectStore('files')
       .index('date')
       .openCursor(null, 'prev');
@@ -202,7 +202,7 @@ var Scanner = (function() {
     request.onsuccess = function() {
       var cursor = request.result;
       if (cursor) {
-        fileinfo = cursor.value;
+        var fileinfo = cursor.value;
         fileinfo.persisted = true; // we know it is in the db
         scanner.files.push(fileinfo);
         scanner.data[fileinfo.name] = fileinfo;
@@ -210,7 +210,7 @@ var Scanner = (function() {
           console.startup('Enumerated ' + scanner.files.length);
         if (scanner.callback) {
           try {
-            scanner.callback('append', fileinfo);
+            scanner.callback('append', fileinfo, scanner.files.length-1);
           }
           catch(e) {
             console.warn('Scanner: enumeration callback threw', e);
@@ -323,7 +323,7 @@ var Scanner = (function() {
       removeFile(scanner, filename);
     }
 
-    if (ignore(scanner, file))
+    if (ignore(scanner, kind, file))
       return;
 
     var fileinfo = {
@@ -342,7 +342,7 @@ var Scanner = (function() {
       // our files[] array, don't save it to the db, and don't notify
       // the client app about it. As long as there is a newer file with
       // good metadata, we'll never scan the broken file again.
-      console.warn('MediaDB: error parsing metadata for', filename, ':', e);
+      console.warn('MediaDB: error parsing metadata for', filename, ':', msg);
       if (callback)
         callback();
     }
@@ -486,7 +486,6 @@ var Scanner = (function() {
     function scanOneKind(kind) {
       var storage = scanner.media[kind].storage;
       var directory = scanner.media[kind].directory || '';
-      var types = scanner.media[kind].mimeTypes || null;
 
       scanner.scanning++;
       if (scanner.scanning === 1) { // if we weren't already scanning

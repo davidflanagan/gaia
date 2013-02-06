@@ -3,29 +3,33 @@
   <head>
     <meta charset="utf-8" />
     <meta http-equiv="pragma" content="no-cache" />
-    <script type="text/javascript" src="js/startup_timing.js"></script>
     <title>Gallery</title>
+    <script src="js/startup_timing.js"></script>
+
+    <!-- Localization -->
+    <link rel="resource" type="application/l10n" href="locales/locales.ini" />
+    <script type="text/javascript" src="shared/js/l10n.js"></script>
+
+    <script src="shared/js/blobview.js"></script>
+    <script src="shared/js/media/jpeg_metadata_parser.js"></script>
+    <script src="shared/js/media/get_video_rotation.js"></script>
+    <script src="js/MetadataParser.js"></script>
+    <script src="js/scanner.js"></script>
+    <script src="js/startup.js"></script>
+
     <link rel="stylesheet" href="style/gallery.css" type="text/css" />
     <link rel="stylesheet" href="style/VideoPlayer.css" type="text/css" />
     <link rel="stylesheet" href="shared/style/headers.css" type="text/css" />
-    <!-- Localization -->
-    <link rel="resource" type="application/l10n" href="locales/locales.ini" />
+
     <!-- Shared code -->
-    <script type="text/javascript" src="shared/js/l10n.js"></script>
-    <script type="text/javascript" defer src="shared/js/async_storage.js"></script>
-    <script type="text/javascript" defer src="shared/js/gesture_detector.js"></script>
-    <script type="text/javascript" defer src="shared/js/mouse_event_shim.js"></script>
-    <script type="text/javascript" defer src="shared/js/mediadb.js"></script>
-    <script type="text/javascript" defer src="shared/js/blobview.js"></script>
-    <script type="text/javascript" defer src="shared/js/media/jpeg_metadata_parser.js"></script>
-    <script type="text/javascript" defer src="shared/js/media/get_video_rotation.js"></script>
-    <script type="text/javascript" defer src="shared/js/media/video_player.js"></script>
-    <script type="text/javascript" defer src="shared/js/media/media_frame.js"></script>
-    <script type="text/javascript" defer src="shared/js/visibility_monitor.js"></script>
+    <script defer src="shared/js/gesture_detector.js"></script>
+    <script defer src="shared/js/mouse_event_shim.js"></script>
+    <script defer src="shared/js/media/video_player.js"></script>
+    <script defer src="shared/js/media/media_frame.js"></script>
+    <script defer src="shared/js/visibility_monitor.js"></script>
     <!-- Specific code -->
-    <script type="text/javascript" defer src="js/MetadataParser.js"></script>
-    <script type="text/javascript" defer src="js/ImageEditor.js"></script>
-    <script type="text/javascript" defer src="js/gallery.js"></script>
+    <script defer src="js/ImageEditor.js"></script>
+    <script defer src="js/gallery.js"></script>
   </head>
 
   <body class="hidden" role="application">
