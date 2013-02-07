@@ -6,6 +6,41 @@
 /*
 Ideas to improve gallery startup time:
 
+What if I didn't use IndexedDB at all?
+  create and store thumbnails in their own files on the sdcard
+  foo/bar.jpg would have a thumbnail in foo/.thumbnails/bar.jpg maybe?
+  (See the DCF standard)
+
+Then the full list of photos and videos would be /sdcard/.gallerydb
+
+Given that just opening the DB takes at least 200ms, I bet I can read
+the entire file in less time.  Thumbnails are already coming from
+files in the indexeddb directory somewhere, so it shouldn't be any
+slower to read them from the sdcard, unless the sdcard is much slower
+than the /data partition.  I can probably create the blob urls during
+the startup process and just retain them. (Or, if I just store File
+objects, they won't get stringified when I persist the files[] array).
+
+JSON or CSV or binary format?
+  easiest to just JSON.stringify my in-memory array.
+  should be plenty fast enough.
+
+  Or is there a more compact representation where we just
+  store an array of filenames and then map those names to their data.
+
+Each entry has:
+
+  filename
+  date
+  type: image or video
+  width and height
+  offset+size of preview image
+ 
+keep the file in sorted order and write it after each scan or
+  after each new photo is taken.
+
+
+
 add logging output for DOMContentLoaded, load, etc.  Maybe a
 mutation observer to listen for scripts and register onload
 handlers for them?
@@ -279,7 +314,20 @@ window.addEventListener('localized', function showBody() {
 
 document.addEventListener('DOMContentLoaded', init);
 
+var scanner;
+
 function init() {
+  scanner = new Scanner('Gallery', 1, {
+    pictures: {
+      mimeTypes: ['image/jpeg', 'image/png'],
+      metadataParser: metadataParsers.imageMetadataParser
+    },
+    videos: {
+      directory: 'DCIM/',
+      metadataParser: metadataParsers.videoMetadataParser
+    }
+  });
+
   // Clicking on the back button goes back to the thumbnail view
   $('fullscreen-back-button').onclick = setView.bind(null, thumbnailListView);
 

@@ -22,7 +22,8 @@ var Scanner = (function() {
     this.scanning = 0;
     this.pendingDBUpdates = [];
     this.pendingNotifications = null;
-    initDB(this);
+//    initDB(this);
+    readFile(this);
   }
 
   // This is the version number of the Scanner schema. If we change this
@@ -129,8 +130,27 @@ var Scanner = (function() {
    */
 
 
+  function readFile(scanner) {
+    console.startup('starting read of file');
+    navigator.getDeviceStorage('sdcard').get('.gallerydb').onsuccess = 
+      function(e) {
+        console.startup('got file from device storage');
+        var file = e.target.result;
+        var reader = new FileReader();
+        reader.readAsText(file);
+        reader.onload = function(e) {
+          console.startup('got file contents ' + reader.result.length);
+          var content = reader.result;
+          var data = JSON.parse(content);
+          console.startup('parsed data');
+          initDB(scanner);
+        };
+      };
+  }
 
   function initDB(scanner) {
+
+
     // Open the database
     // Note that the user can upgrade the version and we can upgrade the version
     var openRequest = indexedDB.open(scanner.dbname,
@@ -595,8 +615,10 @@ var Scanner = (function() {
   }
 
   function persist(scanner) {
-    if (scanner.pendingDBUpdates.length === 0)
+    if (scanner.pendingDBUpdates.length === 0) {
+      persistToFile(scanner);
       return;
+    }
 
     console.startup('saving scan results to db');
 
@@ -622,6 +644,29 @@ var Scanner = (function() {
 
     txn.oncomplete = function() {
       console.startup('scan results saved');
+      persistToFile(scanner);
+    }
+  }
+
+  function persistToFile(scanner) {
+    try {
+      console.startup('Starting to save to file');
+      var data = JSON.stringify(scanner.files);
+      var blob = new Blob([data]);
+      var storage = navigator.getDeviceStorage('sdcard');
+      storage.delete('.gallerydb');
+      var savereq = storage.addNamed(blob, '.gallerydb');
+      
+      savereq.onsuccess = function(e) {
+        console.startup('Saved to file');
+      };
+      savereq.onerror = function(e) {
+        console.startup('failed to save to file');
+        console.log(e.target.error, e.target.error.name);
+      };
+    }
+    catch(e) {
+      console.error("In persistToFile", e);
     }
   }
 

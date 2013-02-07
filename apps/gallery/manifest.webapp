@@ -11,6 +11,7 @@
   "permissions": {
     "device-storage:pictures":{ "access": "readwrite" },
     "device-storage:videos":{ "access": "readwrite" },
+    "device-storage:sdcard":{ "access": "readwrite" },
     "audio-channel-content":{},
     "settings":{ "access": "readonly" }
   },
