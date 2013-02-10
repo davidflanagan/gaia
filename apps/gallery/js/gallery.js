@@ -3,15 +3,21 @@
 
 'use strict';
 
+// XXX
+// I've tried to improve scanning by never doing a fullscan, just verifying
+// that the existing files still exist. But that's not good enough if users
+// copy older files onto the sdcard after using the camera, e.g. So I think
+// I need to go back to the fullscan logic.
+//
+
+
 /*
 Ideas to improve gallery startup time:
 
 What if I didn't use IndexedDB at all?
   create and store thumbnails in their own files on the sdcard
-  foo/bar.jpg would have a thumbnail in foo/.thumbnails/bar.jpg maybe?
-  (See the DCF standard)
 
-Then the full list of photos and videos would be /sdcard/.gallerydb
+Then the full list of photos and videos would be /sdcard/.Gallerydb/index
 
 Given that just opening the DB takes at least 200ms, I bet I can read
 the entire file in less time.  Thumbnails are already coming from
@@ -39,12 +45,62 @@ Each entry has:
 keep the file in sorted order and write it after each scan or
   after each new photo is taken.
 
+Note that one very nice feature of doing it this way is that the right
+thing happens when the user swaps sdcards.
 
 
-add logging output for DOMContentLoaded, load, etc.  Maybe a
-mutation observer to listen for scripts and register onload
-handlers for them?
-   done: shared/js/startup_timing.js
+I've got this scheme implemented.  Reading the entire index file is as
+fast as enumerating just one or two db entries, I think.
+
+Dealing with thumbnails is a little slower, probably because I'm
+saving them to the same partition that I'm scanning. (Hmm: to improve
+scanning speed, do I need to give the thumbnail files a different
+extension so they don't scan as images?  Or does device storage
+automatically ignore them beause they're under a hidden directory?)
+
+When I scan a new file, the thumbnail is an in-memory blob, so I have
+to write it to disk, then read the file back and create a blob
+url. This extra step takes extra time (but conserves memory). For the
+first page of thumbnails, at least, I've got to wait until the write
+completes before continuing because otherwise the file won't be there
+when we try to display it.  Removing the wait takes the full scan from
+150s to 105s or so, so that is a big win, but I can only do it after
+the first page of results.  Or maybe I need to change the thumbnail
+query/cache thing to try again if no thumbnail found.... Actually,
+what if I just used the in-memory blob for the first scan results, at
+least in the first scan case.  that's a good optimization
+
+
+Moving metadata parsing to a worker thread makes almost no difference
+to scan time.  I'm surprised.
+
+scan time is overall kind of slow. I think I might need to throw up a
+bigger scan overlay, like the one proposed for the music app, and
+maybe that will be good enough.
+
+Other ways to move forward on startup performance:
+
+  - use the jsmin built in.
+     how can I combine that with loading stuff dynamically?
+
+  - load scanning+metadata parsing code after enumerating
+
+  - load editing code dynamically
+
+  - load large image display code and video playback code dynamically.
+
+  - refactor these modules so that they do their thing (start the
+    scan, enable UI buttons) only after the necessary code is loaded.
+  
+  - add bigger scanning UI that shows up sooner.
+
+DONE - save thumbnails for first page as typed arrays in the index file
+    so we have them right away.  Can't JSON.stringify them, so will
+    need to think about encoding options.
+
+add logging output for DOMContentLoaded, load, etc.  Maybe a mutation
+observer to listen for scripts and register onload handlers for them?
+done: shared/js/startup_timing.js
 
 make sure scripts are before stylesheets.  Check time difference
    doesn't seem to make much difference. Maybe because of deferred scripts?
@@ -239,6 +295,10 @@ const TRANSITION_FRACTION = 0.25;
 // never go slower (except slide show transitions).
 const TRANSITION_SPEED = 0.75;
 
+// How many thumbnails are visible on the first page
+const PAGE_SIZE = 15; 
+
+
 function $(id) { return document.getElementById(id); }
 
 // UI elements
@@ -317,7 +377,7 @@ document.addEventListener('DOMContentLoaded', init);
 var scanner;
 
 function init() {
-  scanner = new Scanner('Gallery', 1, {
+  scanner = new Scanner('Gallery', 1, scannerCallback, {
     pictures: {
       mimeTypes: ['image/jpeg', 'image/png'],
       metadataParser: metadataParsers.imageMetadataParser
@@ -438,7 +498,7 @@ function init() {
   nextFrame.container.addEventListener('transitionend', removeTransition);
 
   setView(thumbnailListView);
-  initThumbnails();
+//  initThumbnails();
 
 /*
  * the rest of the function commented out for startup tests
@@ -475,120 +535,6 @@ function init() {
 */
 }
 
-/*
-// Initialize MediaDB objects for photos and videos, and set up their
-// event handlers.
-function initDB(include_videos) {
-  photodb = new MediaDB('pictures', metadataParsers.imageMetadataParser, {
-    mimeTypes: ['image/jpeg', 'image/png'],
-    version: 2,
-    autoscan: false,    // We're going to call scan() explicitly
-    batchHoldTime: 350, // Batch files during scanning
-    batchSize: 12       // Max batch size: one screenful
-  });
-
-  if (include_videos) {
-    // For videos, this app is only interested in files under DCIM/.
-    videodb = new MediaDB('videos', metadataParsers.videoMetadataParser, {
-      directory: 'DCIM/',
-      autoscan: false,    // We're going to call scan() explicitly
-      batchHoldTime: 350, // Batch files during scanning
-      batchSize: 12       // Max batch size: one screenful
-    });
-  }
-  else {
-    videodb = null;
-  }
-
-  // This is called when DeviceStorage becomes unavailable because the
-  // sd card is removed or because it is mounted for USB mass storage
-  // This may be called before onready if it is unavailable to begin with
-  // We don't need one of these handlers for the video db, since both
-  // will get the same event at more or less the same time.
-  photodb.onunavailable = function(event) {
-    var why = event.detail;
-    if (why === MediaDB.NOCARD)
-      showOverlay('nocard');
-    else if (why === MediaDB.UNMOUNTED)
-      showOverlay('pluggedin');
-  };
-
-  photodb.onready = function() {
-    // Hide the nocard or pluggedin overlay if it is displayed
-    if (currentOverlay === 'nocard' || currentOverlay === 'pluggedin')
-      showOverlay(null);
-
-    // If we're including videos also, be sure that they are ready
-    if (include_videos) {
-      if (videodb.state === MediaDB.READY)
-        initThumbnails();
-    }
-    else {
-      initThumbnails();
-    }
-  };
-
-  if (include_videos) {
-    videodb.onready = function() {
-      // If the photodb is also ready, create thumbnails.
-      // Depending on the order of the ready events, either this code
-      // or the code above will fire and set up the thumbnails
-      if (photodb.state === MediaDB.READY)
-        initThumbnails();
-    };
-  }
-
-  // When the mediadbs are scanning, let the user know. We count scan starts
-  // and ends so we correctly display the throbber while either db is scanning.
-  var scanning = 0;
-
-  photodb.onscanstart = function onscanstart() {
-    scanning++;
-    if (scanning == 1) {
-      // Show the scanning indicator
-      $('progress').classList.remove('hidden');
-      $('throbber').classList.add('throb');
-    }
-  };
-
-  photodb.onscanend = function onscanend() {
-    scanning--;
-    if (scanning == 0) {
-      // Hide the scanning indicator
-      $('progress').classList.add('hidden');
-      $('throbber').classList.remove('throb');
-      console.startup("Scanning complete");
-    }
-  };
-
-  // One or more files was created (or was just discovered by a scan)
-  photodb.oncreated = function(event) {
-    event.detail.forEach(fileCreated);
-  };
-
-  // One or more files were deleted (or were just discovered missing by a scan)
-  photodb.ondeleted = function(event) {
-    event.detail.forEach(fileDeleted);
-  };
-
-  if (include_videos) {
-    videodb.onscanstart = photodb.onscanstart;
-    videodb.onscanend = photodb.onscanend;
-    videodb.oncreated = photodb.oncreated;
-    videodb.ondeleted = photodb.ondeleted;
-  }
-}
-
-// This comparison function is used for sorting arrays and doing binary
-// search on the resulting sorted arrays.
-function compareFilesByDate(a, b) {
-  if (a.date < b.date)
-    return 1;  // larger (newer) dates come first
-  else if (a.date > b.date)
-    return -1;
-  return 0;
-}
-*/
 
 //
 // Enumerate existing entries in the photo and video databases in reverse
@@ -600,62 +546,118 @@ function compareFilesByDate(a, b) {
 // session or an sdcard replacement.
 //
 function initThumbnails() {
-/*
-  // If we've already been called once, then we've already got thumbnails
-  // displayed. There is no need to re-enumerate them, so we just go
-  // straight to scanning for new files
-  if (visibilityMonitor) {
-    scan();
-    return;
-  }
-*/
   console.startup("initThumbnails()");
 
-  // Keep track of when thumbnails are onscreen and offscreen
-  visibilityMonitor =
-    monitorChildVisibility(thumbnails,
-                           360,                 // extra space top and bottom
-                           thumbnailOnscreen,   // set background image
-                           thumbnailOffscreen); // remove background image
+  thumbnails.textContent = '';
 
-  for(var i = 0; i < scanner.files.length; i++) {
-    thumbnails.appendChild(createThumbnail(i));
+  var firstpage = Math.min(PAGE_SIZE, scanner.files.length);
+  
+  // Fill in the first page, and explicitly set the background image
+  // for these thumbnails so they appear as soon as possible.
+  for(var i = 0; i < firstpage; i++) {
+    var filename = scanner.files[i].name;
+    var thumbnail = createThumbnail(filename);
+    var url = scanner.thumbnails[filename];
+    if (url)
+      thumbnail.style.backgroundImage = 'url("' + url + '")';
+    thumbnails.appendChild(thumbnail);
   }
-  console.startup('displayed initial ' + scanner.files.length + ' files');
 
+  setTimeout(afterFirstPage);
+}
+
+function afterFirstPage() {
+  console.startup("afterFirstPage()");
+
+  // Keep track of when thumbnails are onscreen and offscreen
+  if (!visibilityMonitor) {
+    visibilityMonitor =
+      monitorChildVisibility(thumbnails,
+                             360,                 // extra space top and bottom
+                             thumbnailOnscreen,   // set background image
+                             thumbnailOffscreen); // remove background image
+  }
+  
   // Now that the thumbnails are created, we can start handling clicks
   thumbnails.onclick = thumbnailClickHandler;
-  
-/*
-  // And we can dismiss the spinner overlay
-  $('spinner-overlay').classList.add('hidden');
-*/
-  scanner.setCallback(scannerCallback);
+
+  // now go and create the rest of the thumbnails if there are any
+  for(var i = PAGE_SIZE; i < scanner.files.length; i++) {
+    var filename = scanner.files[i].name;
+    var thumbnail = createThumbnail(filename);
+    thumbnails.appendChild(thumbnail);
+  }
+
+  scanner.scan();
 }
 
 function scannerCallback(type, detail, position) {
   switch(type) {
-  case 'append': // fileinfo, pos
-    // We get these notifications during the initial enumeration of the db
-    // We always get them in order, so we can just append a new thumbnail
-    thumbnails.appendChild(createThumbnail(position));
+  case 'ready': // no args, scanner.files is initialized
+    // Hide the nocard or pluggedin overlay if it is displayed
+    if (currentOverlay === 'nocard' || currentOverlay === 'pluggedin')
+      showOverlay(null);
+
+    // We get this on startup and when sdcard state returns to available
+    // Always rebuild thumbnails when this happens
+    initThumbnails();
     break;
 
   case 'insert': // fileinfo, pos
     // We get these notifications when a new file is created or discovered
     // during scanning. They may not be in order
-    thumbnails.insertBefore(createThumbnail(position),
+    thumbnails.insertBefore(createThumbnail(detail.name),
                             thumbnails.children[position]);
+
     if (currentOverlay === 'emptygallery')
       showOverlay(null);
+
+    if (currentFileIndex >= position)
+      currentFileIndex++;
+    if (editedPhotoIndex >= position)
+      editedPhotoIndex++;
+
+    // Redisplay the current photo if we're in photo view. The current
+    // photo should not change, but the content of the next or previous frame
+    // might. This call will only make changes if the filename to display
+    // in a frame has actually changed.
+    if (currentView === fullscreenView) {
+      showFile(currentFileIndex);
+    }
+
     break;
 
   case 'delete': // fileinfo, pos
     // We get these notifications when a scan discovers a file has been deleted
     // or when we get a device storage event about a deleted file
     thumbnails.removeChild(thumbnails.children[position]);
-    if (scanner.files.length === 0)
-      showOverlay(emptygallery);
+
+    // Adjust currentFileIndex, too, if we have to.
+    if (position < currentFileIndex)
+      currentFileIndex--;
+
+    // If we remove the last file
+    // we need to show the previous image, not the next image.
+    if (currentFileIndex >= scanner.files.length)
+      currentFileIndex = scanner.files.length - 1;
+
+    if (position < editedPhotoIndex)
+      editedPhotoIndex--;
+
+    // If we're in fullscreen mode, then the only way this function
+    // gets called is when we delete the currently displayed photo. This means
+    // that we need to redisplay.
+    if (currentView === fullscreenView && scanner.files.length > 0) {
+      showFile(currentFileIndex);
+    }
+
+    // If there are no more photos show the "no pix" overlay
+    if (scanner.files.length === 0) {
+      if (currentView !== pickView)
+        setView(thumbnailListView);
+      showOverlay('emptygallery');
+    }
+
     break;
 
   case 'scanstart':
@@ -678,158 +680,7 @@ function scannerCallback(type, detail, position) {
     else if (detail === Scanner.UNMOUNTED)
       showOverlay('pluggedin');
     break;
-
-  case 'ready':
-    // Hide the nocard or pluggedin overlay if it is displayed
-    if (currentOverlay === 'nocard' || currentOverlay === 'pluggedin')
-      showOverlay(null);
-    break;
   }
-}
-
-function fileDeleted(filename) {
-  // Find the deleted file in our files array
-  for (var n = 0; n < files.length; n++) {
-    if (files[n].name === filename)
-      break;
-  }
-
-  if (n >= files.length)  // It was a file we didn't know about
-    return;
-
-  // Remove the image from the array
-  var deletedImageData = files.splice(n, 1)[0];
-
-  // Remove the corresponding thumbnail
-  var thumbnailElts = thumbnails.querySelectorAll('.thumbnail');
-  URL.revokeObjectURL(thumbnailElts[n].dataset.backgroundImage.slice(5, -2));
-  thumbnails.removeChild(thumbnailElts[n]);
-
-  // Change the index associated with all the thumbnails after the deleted one
-  // This keeps the data-index attribute of each thumbnail element in sync
-  // with the files[] array.
-  for (var i = n + 1; i < thumbnailElts.length; i++) {
-    thumbnailElts[i].dataset.index = i - 1;
-  }
-
-  // Adjust currentFileIndex, too, if we have to.
-  if (n < currentFileIndex)
-    currentFileIndex--;
-
-  // If we remove the last item in files[],
-  // we need to show the previous image, not the next image.
-  if (currentFileIndex >= files.length)
-    currentFileIndex = files.length - 1;
-
-  if (n < editedPhotoIndex)
-    editedPhotoIndex--;
-
-  // If we're in fullscreen mode, then the only way this function
-  // gets called is when we delete the currently displayed photo. This means
-  // that we need to redisplay.
-  if (currentView === fullscreenView && files.length > 0) {
-    showFile(currentFileIndex);
-  }
-
-  // If there are no more photos show the "no pix" overlay
-  if (files.length === 0) {
-    if (currentView !== pickView)
-      setView(thumbnailListView);
-    showOverlay('emptygallery');
-  }
-}
-
-function deleteFile(n) {
-  if (n < 0 || n >= files.length)
-    return;
-
-  // Delete the file from the MediaDB. This removes the db entry and
-  // deletes the file in device storage. This will generate an change
-  // event which will call imageDeleted()
-  var fileinfo = files[n];
-  if (fileinfo.metadata.video)
-    videodb.deleteFile(fileinfo.name);
-  else
-    photodb.deleteFile(files[n].name);
-}
-
-function fileCreated(fileinfo) {
-  var insertPosition;
-
-  // If we were showing the 'no pictures' overlay, hide it
-  if (currentOverlay === 'emptygallery')
-    showOverlay(null);
-
-  // If this new image is newer than the first one, it goes first
-  // This is the most common case for photos, screenshots, and edits
-  if (files.length === 0 || fileinfo.date > files[0].date) {
-    insertPosition = 0;
-  }
-  else {
-    // Otherwise we have to search for the right insertion spot
-    insertPosition = binarysearch(files, fileinfo, compareFilesByDate);
-  }
-
-  // Insert the image info into the array
-  files.splice(insertPosition, 0, fileinfo);
-
-  // Create a thumbnail for this image and insert it at the right spot
-  var thumbnail = createThumbnail(insertPosition);
-  var thumbnailElts = thumbnails.querySelectorAll('.thumbnail');
-  if (thumbnailElts.length === 0)
-    thumbnails.appendChild(thumbnail);
-  else
-    thumbnails.insertBefore(thumbnail, thumbnailElts[insertPosition]);
-
-  // increment the index of each of the thumbnails after the new one
-  for (var i = insertPosition; i < thumbnailElts.length; i++) {
-    thumbnailElts[i].dataset.index = i + 1;
-  }
-
-  if (currentFileIndex >= insertPosition)
-    currentFileIndex++;
-  if (editedPhotoIndex >= insertPosition)
-    editedPhotoIndex++;
-
-  // Redisplay the current photo if we're in photo view. The current
-  // photo should not change, but the content of the next or previous frame
-  // might. This call will only make changes if the filename to display
-  // in a frame has actually changed.
-  if (currentView === fullscreenView) {
-    showFile(currentFileIndex);
-  }
-
-  if (files.length === 12) {
-    console.startup("displayed first 12 files");
-  }
-
-}
-
-// Assuming that array is sorted according to comparator, return the
-// array index at which element should be inserted to maintain sort order
-function binarysearch(array, element, comparator, from, to) {
-  if (comparator === undefined)
-    comparator = function(a, b) {
-      if (a < b)
-        return -1;
-      if (a > b)
-        return 1;
-      return 0;
-    };
-
-  if (from === undefined)
-    return binarysearch(array, element, comparator, 0, array.length);
-
-  if (from === to)
-    return from;
-
-  var mid = Math.floor((from + to) / 2);
-
-  var result = comparator(element, array[mid]);
-  if (result < 0)
-    return binarysearch(array, element, comparator, from, mid);
-  else
-    return binarysearch(array, element, comparator, mid + 1, to);
 }
 
 // Make the thumbnail for image n visible
@@ -926,35 +777,28 @@ function setView(view) {
 //
 // Create a thumbnail element
 //
-function createThumbnail(imagenum) {
+function createThumbnail(filename) {
   var li = document.createElement('li');
-  li.dataset.index = imagenum;
   li.classList.add('thumbnail');
-
-  var fileinfo = scanner.files[imagenum];
-  // We revoke this url in imageDeleted
-  var url = URL.createObjectURL(fileinfo.metadata.thumbnail);
-
-  // We set the url on a data attribute and let the onscreen
-  // and offscreen callbacks below set and unset the actual
-  // background image style. This means that we don't keep
-  // images decoded if we don't need them.
-  li.dataset.backgroundImage = 'url("' + url + '")';
-  if (scanner.files.length === 12)
-    console.log("Twelve thumbnails in:", Date.now() - performance.timing.navigationStart);
+  li.dataset.filename = filename;
   return li;
 }
 
 // monitorChildVisibility() calls this when a thumbnail comes onscreen
 function thumbnailOnscreen(thumbnail) {
-  if (thumbnail.dataset.backgroundImage)
-    thumbnail.style.backgroundImage = thumbnail.dataset.backgroundImage;
+  scanner.getThumbnailURL(thumbnail.dataset.filename, function(url) {
+    if (!url) {
+      console.warning('No thumbnail for ' + thumbnail.dataset.name);
+      return;
+    }
+
+    thumbnail.style.backgroundImage = 'url("' + url + '")';
+  });
 }
 
 // monitorChildVisibility() calls this when a thumbnail goes offscreen
 function thumbnailOffscreen(thumbnail) {
-  if (thumbnail.dataset.backgroundImage)
-    thumbnail.style.backgroundImage = null;
+  thumbnail.style.backgroundImage = null;
 }
 
 //
@@ -983,7 +827,7 @@ function startPick(activityRequest) {
 function cropPickedImage(fileinfo) {
   setView(cropView);
 
-  photodb.getFile(fileinfo.name, function(file) {
+  scanner.getFile(fileinfo.name, function(file) {
     cropURL = URL.createObjectURL(file);
     cropEditor = new ImageEditor(cropURL, $('crop-frame'), {}, function() {
       cropEditor.showCropOverlay();
@@ -1045,7 +889,7 @@ window.addEventListener('mozvisibilitychange', function() {
 
 
 // Clicking on a thumbnail does different things depending on the view.
-// In thumbnail list mode, it displays the image. In thumbanilSelect mode
+// In thumbnail list mode, it displays the image. In thumbnailSelect mode
 // it selects the image. In pick mode, it finishes the pick activity
 // with the image filename
 function thumbnailClickHandler(evt) {
@@ -1054,13 +898,15 @@ function thumbnailClickHandler(evt) {
     return;
 
   if (currentView === thumbnailListView || currentView === fullscreenView) {
-    showFile(parseInt(target.dataset.index));
+    var fileinfo = scanner.data[target.dataset.filename];
+    var position = scanner.files.indexOf(fileinfo);
+    showFile(position);
   }
   else if (currentView === thumbnailSelectView) {
     updateSelection(target);
   }
   else if (currentView === pickView) {
-    cropPickedImage(files[parseInt(target.dataset.index)]);
+    cropPickedImage(scanner.data[target.dataset.filename]);
   }
 }
 
@@ -1083,13 +929,11 @@ function updateSelection(thumbnail) {
   // Now update the list of selected filenames and filename->blob map
   // based on whether we selected or deselected the thumbnail
   var selected = thumbnail.classList.contains('selected');
-  var index = parseInt(thumbnail.dataset.index);
-  var filename = files[index].name;
+  var filename = thumbnail.dataset.filename;
 
   if (selected) {
     selectedFileNames.push(filename);
-    var db = files[index].metadata.video ? videodb : photodb;
-    db.getFile(filename, function(file) {
+    scanner.getFile(filename, function(file) {
       selectedFileNamesToBlobs[filename] = file;
     });
   }
@@ -1131,13 +975,9 @@ function deleteSelectedItems() {
 
   var msg = navigator.mozL10n.get('delete-n-items?', {n: selected.length});
   if (confirm(msg)) {
-    // XXX
-    // deleteFile is O(n), so this loop is O(n*n). If used with really large
-    // selections, it might have noticably bad performance.  If so, we
-    // can write a more efficient deleteFiles() function.
     for (var i = 0; i < selected.length; i++) {
       selected[i].classList.toggle('selected');
-      deleteFile(parseInt(selected[i].dataset.index));
+      scanner.deleteFile(selected[i].dataset.filename);
     }
     clearSelection();
   }
@@ -1145,15 +985,16 @@ function deleteSelectedItems() {
 
 // Clicking the delete button while viewing a single item deletes that item
 function deleteSingleItem() {
+  var fileinfo = scanner.files[currentFileIndex];
   var msg;
-  if (files[currentFileIndex].metadata.video) {
+  if (fileinfo.kind === 'videos') {
     msg = navigator.mozL10n.get('delete-video?');
   }
   else {
     msg = navigator.mozL10n.get('delete-photo?');
   }
   if (confirm(msg)) {
-    deleteFile(currentFileIndex);
+    scanner.deleteFile(fileinfo.name);
   }
 }
 
@@ -1336,7 +1177,7 @@ function panHandler(event) {
 
   // Don't swipe past the end of the last item or past the start of the first
   if ((currentFileIndex === 0 && frameOffset > 0) ||
-      (currentFileIndex === files.length - 1 && frameOffset < 0)) {
+      (currentFileIndex === scanner.files.length - 1 && frameOffset < 0)) {
     frameOffset = 0;
   }
 
@@ -1371,7 +1212,7 @@ function swipeHandler(event) {
 
   // Is there a next or previous item to transition to?
   var fileexists =
-    (direction === 1 && currentFileIndex + 1 < files.length) ||
+    (direction === 1 && currentFileIndex + 1 < scanner.files.length) ||
     (direction === -1 && currentFileIndex > 0);
 
   // If all of these conditions hold, then we'll transition to the
@@ -1421,13 +1262,13 @@ function transformHandler(e) {
 // Used in showFile(), nextFile() and previousFile().
 function setupFrameContent(n, frame) {
   // Make sure n is in range
-  if (n < 0 || n >= files.length) {
+  if (n < 0 || n >= scanner.files.length) {
     frame.clear();
     delete frame.filename;
     return;
   }
 
-  var fileinfo = files[n];
+  var fileinfo = scanner.files[n];
 
   // If we're already displaying this file in this frame, then do nothing
   if (fileinfo.name === frame.filename)
@@ -1436,22 +1277,20 @@ function setupFrameContent(n, frame) {
   // Remember what file we're going to display
   frame.filename = fileinfo.name;
 
-  if (fileinfo.metadata.video) {
-    videodb.getFile(fileinfo.name, function(file) {
+  scanner.getFile(fileinfo.name, function(file) {
+    if (fileinfo.kind === 'videos') {
       frame.displayVideo(file,
                          fileinfo.metadata.width,
                          fileinfo.metadata.height,
                          fileinfo.metadata.rotation || 0);
-    });
-  }
-  else {
-    photodb.getFile(fileinfo.name, function(file) {
+    }
+    else {
       frame.displayImage(file,
                          fileinfo.metadata.width,
                          fileinfo.metadata.height,
                          fileinfo.metadata.preview);
-    });
-  }
+    }
+  });
 }
 
 var FRAME_BORDER_WIDTH = 3;
@@ -1486,7 +1325,7 @@ function showFile(n) {
   resetFramesPosition();
 
   // Disable the edit button if this is a video, and enable otherwise
-  if (files[n].metadata.video)
+  if (scanner.files[n].metadata.kind === 'videos')
     $('fullscreen-edit-button').classList.add('disabled');
   else
     $('fullscreen-edit-button').classList.remove('disabled');
@@ -1496,7 +1335,7 @@ function showFile(n) {
 // This is used when the user pans.
 function nextFile(time) {
   // If already displaying the last one, do nothing.
-  if (currentFileIndex === files.length - 1)
+  if (currentFileIndex === scanner.files.length - 1)
     return;
 
   // Don't pan a playing video!
@@ -1597,10 +1436,10 @@ var imageEditor;
 // Ensure there is enough space to store an edited copy of photo n
 // and if there is, call editPhoto to do so
 function editPhotoIfCardNotFull(n) {
-  var fileinfo = files[n];
+  var fileinfo = scanner.files[n];
   var imagesize = fileinfo.size;
 
-  photodb.freeSpace(function(freespace) {
+  scanner.freeSpace(function(freespace) {
     // the edited image might take up more space on the disk, but
     // not all that much more
     if (freespace > imagesize * 2) {
@@ -1618,7 +1457,8 @@ function editPhoto(n) {
   // Start with no edits
   editSettings = {
     crop: {
-      x: 0, y: 0, w: files[n].metadata.width, h: files[n].metadata.height
+      x: 0, y: 0,
+      w: scanner.files[n].metadata.width, h: scanner.files[n].metadata.height
     },
     gamma: 1,
     borderWidth: 0,
@@ -1626,7 +1466,7 @@ function editPhoto(n) {
   };
 
   // Start looking up the image file
-  photodb.getFile(files[n].name, function(file) {
+  scanner.getFile(scanner.files[n].name, function(file) {
     // Once we get the file create a URL for it and use that url for the
     // preview image and all the buttons that need it.
     editedPhotoURL = URL.createObjectURL(file);
@@ -1875,7 +1715,7 @@ function saveEditedImage() {
 
   imageEditor.getFullSizeBlob('image/jpeg', function(blob) {
 
-    var original = files[editedPhotoIndex].name;
+    var original = scanner.files[editedPhotoIndex].name;
     var basename, extension, filename;
     var version = 1;
     var p = original.lastIndexOf('.');
@@ -1894,7 +1734,7 @@ function saveEditedImage() {
     // XXX: this loop is O(n^2) and slow if the user saves many edits
     // of the same image.
     filename = basename + '.edit' + version + extension;
-    while (files.some(function(i) { return i.name === filename; })) {
+    while (scanner.files.some(function(i) { return i.name === filename; })) {
       version++;
       filename = basename + '.edit' + version + extension;
     }
@@ -1905,7 +1745,7 @@ function saveEditedImage() {
     // it si the most recent one. Ideally, I'd like a more
     // sophisticated sort order that put edited sets of photos next to
     // each other.
-    photodb.addFile(filename, blob);
+    scanner.addFile('pictures', filename, blob);
 
     // We're done.
     exitEditMode(true);

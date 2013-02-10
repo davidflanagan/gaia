@@ -1,12 +1,11 @@
 'use strict';
-
 /*
 var metadataWorker = new Worker('js/metadata_worker.js');
 var metadataCallbacks = [];
 
 metadataWorker.onmessage = function(e) {
   if (typeof e.data === 'object' && e.data.log) {
-    console.log("Worker message", e.data.log);
+    console.log('worker', e.data.log);
     return;
   }
 
@@ -15,9 +14,7 @@ metadataWorker.onmessage = function(e) {
 }
 
 function parseJPEGMetadata(file, callback, errorCallback) {
-  console.log('entering parseJPEGMetadata');
   metadataCallbacks.push(function(data) {
-    console.log('parseJPEGMetadata: got reponse from worker');
     if (typeof data === 'object') {
       callback(data);
     }
@@ -29,10 +26,11 @@ function parseJPEGMetadata(file, callback, errorCallback) {
 }
 
 function getVideoRotation(file, callback) {
-  metadataCallbacks.push(function(data) { callback(data); });
+  metadataCallbacks.push(callback);
   metadataWorker.postMessage({file:file, type:'video'});
 }
 */
+
 //
 // This file defines a single metadataParsers object. The two
 // properties of this object are metadata parsing functions for image
