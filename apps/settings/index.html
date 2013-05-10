@@ -32,7 +32,6 @@
     <link rel="resource" type="application/json" href="shared/resources/tz.json"/>
     <link rel="resource" type="application/json" href="shared/resources/apn.json"/>
     <link rel="resource" type="application/json" href="shared/resources/languages.json"/>
-    <link rel="resource" type="application/json" href="shared/resources/keyboard_layouts.json"/>
     <link rel="resource" type="application/json" href="shared/resources/media/ringtones/"/>
     <link rel="resource" type="application/json" href="shared/resources/media/notifications/"/>
     <link rel="resource" type="image/png" href="shared/resources/branding/privacy_sprite.png"/>
@@ -163,6 +162,7 @@
     </section>
 
     <!-- Connectivity :: Wi-Fi :: Join Hidden Network -->
+    <!-- option "WPA-EAP" in Security is temporarily removed as per Bug 869843. -->
     <section role="region" id="wifi-joinHidden">
       <!--
       <header>
@@ -187,7 +187,6 @@
                 <option data-l10n-id="securityNone">none</option>
                 <option>WEP</option>
                 <option selected>WPA-PSK</option>
-                <option>WPA-EAP</option>
               </select>
             </p>
           </li>
