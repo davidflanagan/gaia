@@ -95,9 +95,6 @@ function monitorChildVisibility(scrollingElement,
   // This is the last onscreen region that we have notified the client about
   var firstNotifiedOnscreen = null, lastNotifiedOnscreen = null;
 
-  // The timer used by deferCallbacks()
-  var pendingCallbacks = null;
-
   // The scrolling element's scrollTop when we last recomputed visibility.
   var lastScrollTop = -1;
 
@@ -163,12 +160,6 @@ function monitorChildVisibility(scrollingElement,
     // container changes the layout and needs adjustBounds, etc.
     // Can I use one observer with multiple calls to observe on different
     // elements?
-
-    // If there are any pending callbacks, call them now before handling
-    // the mutations so that we start off in sync, with the onscreen range
-    // equal to the notified range.
-    if (pendingCallbacks)
-      callCallbacks();
 
     for (var i = 0; i < mutations.length; i++) {
       var mutation = mutations[i];
@@ -276,14 +267,8 @@ function monitorChildVisibility(scrollingElement,
     callCallbacks();
   }
 
-  // Adjust the onscreen element range and asynchronously call
-  // onscreen and offscreen callbacks as needed. We do this
-  // asynchronously so that if we get lots of scroll events in
-  // rapid succession and can't keep up, we can skip some of
-  // the notifications.
-  // XXX: adjust this comment since we don't usually do it asynchronously
-  // anymore. In fact, maybe I should just remove that option since it is
-  // unused (check that).
+  // Adjust the onscreen element range and call onscreen and offscreen
+  // callbacks if we've scrolled more than scrolldelta pixels.
   function scrollHandler() {
     // Ignore scrolls while we are not displayed because
     // none of our calculations will be right
@@ -301,21 +286,7 @@ function monitorChildVisibility(scrollingElement,
     lastScrollTop = scrollTop;
 
     adjustBounds();
-
-    if (scrolldelta > 1) {
-      // Assume that clients are using the scrolldelta to batch work,
-      // and that they want finer control over scheduling.  Recompute
-      // visibility immediately.
-      callCallbacks();
-    } else {
-      // Assume that clients are relying on us to throttle work while
-      // the user is busy.
-      //
-      // We may get a lot of scroll events in quick succession, so
-      // don't call the callbacks synchronously. Instead defer so that
-      // we can handle any other queued scroll events.
-      deferCallbacks();
-    }
+    callCallbacks();
   }
 
   // Return true if node a is before node b and false otherwise
@@ -443,28 +414,11 @@ function monitorChildVisibility(scrollingElement,
     }
   }
 
-  // Call the callCallbacks() function after any pending events are processed
-  // We use this for asynchronous notification after scroll events.
-  function deferCallbacks() {
-    if (pendingCallbacks) {
-      // XXX: or we could just return here, which would defer for less time.
-      clearTimeout(pendingCallbacks);
-    }
-    pendingCallbacks = setTimeout(callCallbacks, 0);
-  }
-
   // Synchronously call the callbacks to notify the client of the new set
   // of onscreen elements. This only calls the onscreen and offscreen
   // callbacks for elements that have come onscreen or gone offscreen since
   // the last time it was called.
   function callCallbacks() {
-    // If there is a pending call to this function (or if this was the pending
-    // call) clear it now, since we are sending the callbacks
-    if (pendingCallbacks) {
-      clearTimeout(pendingCallbacks);
-      pendingCallbacks = null;
-    }
-
     // Call the onscreen callback for element from and its siblings
     // up to, but not including to.
     function onscreen(from, to) {
