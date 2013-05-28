@@ -43,7 +43,6 @@
  * omitted, then only direct children of the scrolling element will be
  * monitored. If specified, then children of containers of the specified
  * type that are children of the scrolling element will be monitored.
- * (XXX: do we allow arbitrary nesting of containers, or only grandchildren?)
  *
  * The return value of this function is an object that has a stop() method.
  * calling the stop method stops visiblity monitoring. If you want to restart
@@ -105,11 +104,8 @@ function monitorChildVisibility(scrollingElement,
   window.addEventListener('resize', resizeHandler);
 
   // Update the onscreen region when children are added or removed
-  // XXX: either update this to monitor the entire subtree, or update
-  // the handler to add a new observer for each container child
-  // This depends on containerType, of course.
   var observer = new MutationObserver(mutationHandler);
-  observer.observe(scrollingElement, { childList: true });
+  observer.observe(scrollingElement, { subtree: true });
 
   // Now determine the initial onscreen region
   adjustBounds();
@@ -124,7 +120,6 @@ function monitorChildVisibility(scrollingElement,
       scrollingElement.removeEventListener('scroll', scrollHandler);
       window.removeEventListener('resize', resizeHandler);
       observer.disconnect();
-      // XXX: are there other observers for containers?
     }
   };
 
@@ -143,8 +138,23 @@ function monitorChildVisibility(scrollingElement,
   }
 
   // Called when children are added or removed from the scrolling element.
-  // Adding and removing nodes can change the position of other elements
-  // so changes may extend beyond just the ones added or removed
+  //
+  // We've got to do several things here:
+  //
+  // 1) Anything (including text nodes) added or removed can change what is
+  // visible, so have to consider all mutations, even if they don't match
+  // childType or containerType, and possibly call adjustBounds()
+  //
+  // 2) If we add a new child on screen, we have to call the onscreen
+  // callback for it because adjustBounds/callCallback may not get it.
+  // But for this case, we only call the callback if the the element type
+  // and container type is right.
+  //
+  // 3) Similarly, if a container is added on screen, then we've
+  //  got to call the callbacks on all of its children with the right type.
+  //  But they might not all be onscreen, it is simplest in the case to
+  //  just adjust the bounds and figure it out in adjustBounds
+  //
   function mutationHandler(mutations) {
     // Ignore any mutations while we are not displayed because
     // none of our calculations will be right
@@ -152,119 +162,100 @@ function monitorChildVisibility(scrollingElement,
       return;
     }
 
-    // XXX:
-    // If there is a container type, see if we've added a container
-    // and start observing that?
-    // I need to see what happens when adding a container that already
-    // has kids. I think I need to assume that adding or removing a
-    // container changes the layout and needs adjustBounds, etc.
-    // Can I use one observer with multiple calls to observe on different
-    // elements?
+    var visibilityChanged = false;
 
     for (var i = 0; i < mutations.length; i++) {
       var mutation = mutations[i];
       if (mutation.addedNodes) {
         for (var j = 0; j < mutation.addedNodes.length; j++) {
-          var child = mutation.addedNodes[j];
-          // XXX: add test for childType here
-          // XXX: also handle new container insertion?
-          if (child.nodeType === Node.ELEMENT_NODE)
-            childAdded(child);
+          if (added(mutation.addedNodes[j]))
+            visibilityChanged = true;
         }
       }
 
       if (mutation.removedNodes) {
         for (var j = 0; j < mutation.removedNodes.length; j++) {
-          var child = mutation.removedNodes[j];
-          // XXX: add test for childType here
-          // XXX: also handle new container insertion?
-          if (child.nodeType === Node.ELEMENT_NODE)
-            childRemoved(child,
-                         mutation.previousSibling,
-                         mutation.nextSibling);
+          if (removed(mutation.removedNodes[j],
+                      mutation.previousSibling,
+                      mutation.nextSibling))
+            visibilityChanged = true;
         }
       }
     }
-  }
 
-  // If the new child is onscreen, call the onscreen callback for it.
-  // Adjust the onscreen element range and synchronously call
-  // onscreen and offscreen callbacks as needed.
-  function childAdded(child) {
-    // If the added child is after the last onscreen child, and we're
-    // not filling in the first page of content then this insertion
-    // doesn't affect us at all.
-    if (lastOnscreen &&
-        after(child, lastOnscreen) &&
-        child.offsetTop > scrollingElement.clientHeight + scrollmargin)
-      return;
-
-    // Otherwise, if this is the first element added or if it is after
-    // the first onscreen element, then it is onscreen and we need to
-    // call the onscreen callback for it.
-    if (!firstOnscreen || after(child, firstOnscreen)) {
-      // Invoke the onscreen callback for this child
-      try {
-        onscreenCallback(child);
-      }
-      catch (e) {
-        console.warn('monitorChildVisibility: Exception in onscreenCallback:',
-                     e, e.stack);
-      }
-    }
-
-    // Now adjust the first and last onscreen element and
-    // send a synchronous notification
-    adjustBounds();
-    callCallbacks();
-  }
-
-  // If the removed element was after the last onscreen element just return.
-  // Otherwise adjust the onscreen element range and synchronously call
-  // onscreen and offscreen callbacks as needed. Note, however that there
-  // are some special cases when the last element is deleted or when the
-  // first or last onscreen element is deleted.
-  function childRemoved(child, previous, next) {
-    // If there aren't any elements left revert back to initial state
-    if (firstElement() === null) {
-      firstOnscreen = lastOnscreen = null;
-      firstNotifiedOnscreen = lastNotifiedOnscreen = null;
-    }
-    else {
-      // If the removed child was after the last onscreen child, then
-      // this removal doesn't affect us at all.
-      if (previous !== null && after(previous, lastOnscreen))
-        return;
-
-      // If the first onscreen element was the one removed
-      // use the next or previous element as a starting point instead.
-      // We know that there is at least one element left, so one of these
-      // two must be defined.
-      //
-      // XXX: I can't assume that the next and previous values from the
-      // mutation record are elements of the right type. And if they are
-      // null there may still be elements in an adjacent container.  So
-      // this algorithm breaks in this generalized case. If we're just
-      // observing the childList of a container, then we can use the target
-      // to find the container, and can optimize based on that, I think.  I
-      // wonder if adjust bounds will do the right thing if I just set
-      // firstOnScreen and/or lastOnScreen to null?  I don't think that
-      // we need to be super efficient for this deletion case.
-      if (child === firstOnscreen) {
-        firstOnscreen = firstNotifiedOnscreen = next || previous;
-      }
-
-      // And similarly for the last onscreen element
-      if (child === lastOnscreen) {
-        lastOnscreen = lastNotifiedOnscreen = previous || next;
-      }
-
-      // Find the new bounds after the deletion
+    if (visibilityChanged) {
       adjustBounds();
+      callCallbacks();
     }
 
-    // Synchronously call the callbacks
-    callCallbacks();
+    function added(n) {
+      // If the added node is after the last onscreen child, and we're
+      // not filling in the first page of content then this insertion
+      // doesn't affect us at all.
+      if (lastOnscreen &&
+          after(n, lastOnscreen) &&
+          (n.nodeType !== Node.ELEMENT_NODE ||
+           n.offsetTop > scrollingElement.clientHeight + scrollmargin))
+        return false;
+
+      // Now we now that this new node has affected the visible bounds.
+      // Ideally, we'd leave the firstOnscreen and lastOnscreen nodes
+      // unmodified and call the onscreen callback for the new node (or
+      // nodes if the new element is a container with children). But this
+      // becomes complicated to deal with all combinations of childType and
+      // containerType. So as a shortcut, at least for now, we just reset
+      // the lastOnscreen (and lastNotifiedOnscreen) to be the same as
+      // firstOnscreen.  That way, the adjustBounds/callCallbacks functions
+      // will find all of the new elements that are onscreen and will call
+      // the onscreen callback for them.  The inefficiency is that this may
+      // also redundantly call the onscreen callbacks for elements that are
+      // already onscreen.
+      if (n.nodeType === Node.ELEMENT_NODE) {
+        lastOnscreen = firstOnscreen ;
+      }
+
+      // The visible bounds have probably changed, so return true so that
+      // we call adjustBounds and callCallbacks.
+      return true;
+    }
+
+    function removed(n, previous, next) {
+      // If our first onscreen child is no longer in the document (because
+      // it or its container was removed) then revert to an initial state
+      // where we know nothing about the onscreen region and let
+      // adjustBounds figure it out the hard way.
+      if (firstOnscreen &&
+          firstOnscreen.compareDocumentPosition(scrollingElement) & 1) {
+        firstOnscreen = lastOnscreen = null;
+        firstNotifiedOnscreen = lastNotifiedOnscreen = null;
+        return true;
+      }
+
+      // If our last onscreen child is no longer in the document (because
+      // it or its container was removed) then revert the last onscreen to
+      // be the same as the firstOnscreen and let adjustBounds figure it out.
+      // This will probably cause redundant calls to the onscreen callback,
+      // but node removals are rare enough that it is okay be inefficient
+      // in this case.
+      if (lastOnscreen &&
+          lastOnscreen.compareDocumentPosition(scrollingElement) & 1) {
+        lastOnscreen = lastNotifiedOnscreen = firstOnscreen
+        return true;
+      }
+
+      // If there is a previous node, and that node is after the last
+      // onscreen element, then this mutation does not affect the visible
+      // region, and we can just return false right away
+      if (lastOnscreen && previous && after(previous, lastOnscreen)) {
+        return false;
+      }
+
+      // The visible bounds have probably changed, so we return true here
+      // so that adjustBounds will get called. If we get here, though, both
+      // the first and last visible elements are still in the document, so
+      // we don't have to change them: adjustBounds() will do the right thing.
+      return true;
+    }
   }
 
   // Adjust the onscreen element range and call onscreen and offscreen
@@ -304,6 +295,9 @@ function monitorChildVisibility(scrollingElement,
   // or previousElementSibling iteration to find the range. But it can also
   // start from an unknown state and search the entire scrolling element to
   // find the range of child elements that are onscreen.
+  //
+  // XXX Can I merge this and callCallbacks() into a single function?
+  //
   function adjustBounds() {
     var firstElement = firstElement();
     // If the scrolling element has no children, the bounds are null
