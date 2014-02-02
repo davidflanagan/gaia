@@ -261,7 +261,7 @@
       altrow.dir = 'ltr';  // left to right
       altrow.style.right = 'auto';
       if (numalternatives === 1)
-        x = (keyrect.left + keyrect.right)/2 - firstwidth/2;
+        x = (keyrect.left + keyrect.right) / 2 - firstwidth / 2;
       else
         x = keyrect.right - firstwidth;
       altrow.style.left = Math.max(x, 0) + 'px';
@@ -270,7 +270,7 @@
       altrow.dir = 'rtl';  // right to left
       altrow.style.left = 'auto';
       if (numalternatives === 1)
-        x = (keyrect.left + keyrect.right)/2 + firstwidth/2;
+        x = (keyrect.left + keyrect.right) / 2 + firstwidth / 2;
       else
         x = keyrect.left + firstwidth;
       altrow.style.right = Math.max(window.innerWidth - x, 0) + 'px';
