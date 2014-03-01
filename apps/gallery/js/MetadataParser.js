@@ -30,8 +30,8 @@ var metadataParser = (function() {
   var offscreenImage = new Image();
 
   // The screen size. Preview images must be at least this big
-  var sw = window.innerWidth;
-  var sh = window.innerHeight;
+  var sw = window.innerWidth * window.devicePixelRatio;
+  var sh = window.innerHeight * window.devicePixelRatio;
 
   // Create a thumbnail size canvas, copy the <img> or <video> into it
   // cropping the edges as needed to make it fit, and then extract the
@@ -286,9 +286,88 @@ var metadataParser = (function() {
   // a metadata object, and pass the object to the callback function.
   // If anything goes wrong, pass an error message to the error function.
   // If it is a large image, create and save a preview for it as well.
-  function createThumbnailAndPreview(file, callback, error, nopreview,
+  function createThumbnailAndPreview(file, callback, error, noPreviewNeeded,
                                      bigFile, metadata) {
+    // This is the blob url of the blob we've been passed.
     var url = URL.createObjectURL(file);
+
+    // We don't want to decode the blob at full size, however, so we'll add a
+    // media fragment to request a smaller size. If we need to create a
+    // preview we'll decode it at preview size.  If we only need to create
+    // a thumbnail, we'll decode it at thumbnail size. Note that we can only
+    // do this optimization if we know the width and height of the image.
+    if (metadata.width && metadata.height) {
+
+      var targetPreviewWidth, targetPreviewHeight;
+
+      // Figure out the minimum size that the image can be displayed at so that
+      // it will fit the screen in both landscape and portrait mode
+
+      // Figure out the preview size.
+      // Make sure the size is big enough for both landscape and portrait
+      var previewScale = Math.max(Math.min(sw / metadata.width,
+                                           sh / metadata.height,
+                                           1),
+                                  Math.min(sh / metadata.width,
+                                           sw / metadata.height,
+                                           1));
+      var targetPreviewWidth = metadata.width * previewScale;
+      var targetPreviewHeight = metadata.height * previewScale;
+
+      // We don't need a preview if the image is small to begin with
+      if (!noPreviewNeeded &&
+          (previewScale === 1 ||
+           metadata.width * metadata.height < 512 * 1024)) {
+        noPreviewNeeded = true;
+      }
+
+      // In order to calculate the sample size, we've got to know the size
+      // of the file or blob that we've been passed, and that depends on
+      // whether we were passed the full file or an EXIF preview
+      var originalWidth, originalHeight;
+      var targetWidth, targetHeight;
+
+      if (metadata.preview &&
+          metadata.preview.width && metadata.preview.height)
+      {
+        // in this case, the file is just the EXIF preview
+        originalWidth = metadata.preview.width;
+        originalHeight = metadata.preview.height;
+      }
+      else {
+        // in this case, the file is the full image
+        originalWidth = metadata.width;
+        originalHeight = metadata.height;
+      }
+
+      // We also need whether our target is a thumbnail or a preview
+      if (noPreviewNeeded) {
+        targetWidth = THUMBNAIL_WIDTH;
+        targetHeight = THUMBNAIL_HEIGHT;
+      }
+      else {
+        targetWidth = targetPreviewWidth;
+        targetHeight = targetPreviewHeight;
+      }
+
+      // With the original and target sizes, we compute a sample size factor
+      // that we use with the #-moz-samplesize media fragment so that we
+      // decode the image at a size close to the target size.
+      var samplesize = Math.floor(Math.min(originalWidth / targetWidth,
+                                           originalHeight / targetHeight));
+
+      // If we can decode the image at a smaller size add a media fragment
+      // to the URL. This might only work for JPEG images, but it shouldn't
+      // hurt to do it for all.
+      if (samplesize > 1) {
+        url += '#-moz-samplesize=' + samplesize;
+      }
+
+      console.log('original', originalWidth, originalHeight,
+                  'target', targetWidth, targetHeight,
+                  'samplesize', samplesize);
+    }
+
     offscreenImage.src = url;
 
     offscreenImage.onerror = function() {
@@ -302,9 +381,12 @@ var metadataParser = (function() {
 
       var iw = offscreenImage.width;
       var ih = offscreenImage.height;
+      console.log('image decoded at',
+                  offscreenImage.width, offscreenImage.height);
 
-      // Don't overwrite the metadata in the case we read a previewblob.
-      if (!nopreview) {
+      // If we didn't have a width and height for the image to begin with
+      // then we read the image at full size, and now we know the size
+      if (!metadata.width || !metadata.height) {
         metadata.width = iw;
         metadata.height = ih;
       }
@@ -345,7 +427,7 @@ var metadataParser = (function() {
         // If no preview was requested, or if if the image was less
         // than half a megapixel then it does not need a preview
         // image, and we can call the callback right away
-        if (nopreview || metadata.width * metadata.height < 512 * 1024) {
+        if (noPreviewNeeded) {
           offscreenImage.src = '';
           callback(metadata);
         }
