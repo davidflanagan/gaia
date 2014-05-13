@@ -1,0 +1,94 @@
+On low-memory devices like Tarako, the Music app often dies when it is
+in the background because of low memory. This means that the user
+can't play music while using other apps. To enable this use case, we
+want to move music playback to the system app, without moving any of
+the music app database management or UX into the system app.
+
+Currently:
+
+  Music app does playing, broadcasts now playing info via bluetooth
+  and IAC (to the system app) so that bluetooth devices and lockscreen
+  and notification screen can display playback controls.
+
+  It listens for commands from those remote controls and responds to
+  them.
+
+What we want to do is to move the <audio> element and the
+communication code to the system app.  Then the music app's controls
+would be just like those on the lockscreen. And the music app would
+get its now playing info from the system app via iac.
+
+What's new is that we now need an API that allows the music app to add
+songs (and metadata including album art) to the current playlist and
+to create new playlists.  This way our music app (or any app that can
+use IAC [currently certified only]) has equal access to background
+music playback.
+
+This should be designed as a polyfill API that could eventually become
+a Web API that gives access to the OS default media player.  (On a
+Mac desktop, using the API would control iTunes. On Windows, Windows
+Media Player. etc.)  Does Android have anything like this?
+
+BackgroundMusicService
+PlaylistManager
+
+- newPlaylist(name?)
+- addTrack(filename or url, metadata)
+- shuffle() (or should the music app handle shuffling?)
+
+- play()
+- pause()
+- next()
+- previous()
+- getNowPlaying() (or some way to get current state. Probably just
+     requests an event)
+
+Events:
+
+- nowplaying
+     sent when the playing track changes or when requested.
+     includes all metadata for the song, plus current playback
+     position. Also specifies which buttons should be enabled.
+     If no songs at all, even play/pause will be disabled.
+
+- statechanged
+     sent when music plays or pauses
+
+  Or maybe simplify and just have a single event that includes all
+  state. Hmm. But don't pass blobs back and forth unnecessarily.
+
+This is for low-memory, so we don't want the system app to be in the
+business of decoding album art or even passing blobs between apps. So
+album art should probably be file-backed blobs or filenames or
+filenames plus size and offsets
+
+The lockscreen and notification screen are going to be clients of this
+service, sending player commands and displaying metadata.  They will
+need a way to use the service directly since they are in the system
+app with the player.
+
+The Music app will want to use the very same API but have it work
+remotely via IAC. We can implement a local client that delegates
+everything to an IAC connection.  Interested apps (the music app)
+initiate an IAC connection. The system app accepts the connection.
+
+To support bluetooth, we'll have another client of the service that
+translates bluetooth commands and translates nowplaying info from the
+service to bluetooth. So the playback service itself can be free of
+bluetooth stuff.
+
+--------
+
+System app:
+
+  PlaylistService -- the local implementation that actually manages the
+    audio element.
+
+  PlaylistServiceBluetoothProxy -- bluetooth
+
+  PlaylistServiceIACProxy -- IAC
+
+shared/js/media:
+
+  PlaylistServicePolyfill -- the other side of the IAC connection
+
