@@ -1,0 +1,16 @@
+html, body {
+    font-size: 10px;
+    width: 100%;
+    height: 100%;
+    background-color: black;
+    overflow: hidden;
+}
+
+#steps {
+    position: absolute;
+    top: 8rem;
+    width: 100%;
+    color: orange;
+    font-size: 10rem;
+    text-align: center;
+}
