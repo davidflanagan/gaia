@@ -1,0 +1,10 @@
+{
+  "name": "Pedometer",
+  "description": "Pedometer",
+  "type": "privileged",
+  "launch_path": "/index.html",
+  "developer": {
+    "name": "The Gaia Team",
+    "url": "https://github.com/mozilla-b2g/gaia"
+  }
+}
