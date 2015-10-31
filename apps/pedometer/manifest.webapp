@@ -1,0 +1,17 @@
+{
+  "name": "Pedometer",
+  "description": "Pedometer",
+  "type": "privileged",
+  "launch_path": "/index.html",
+  "developer": {
+    "name": "The Gaia Team",
+    "url": "https://github.com/mozilla-b2g/gaia"
+  },
+  "icons": {
+    "84": "/style/icons/feet-84.png",
+    "126": "/style/icons/feet-126.png",
+    "142": "/style/icons/feet-142.png",
+    "189": "/style/icons/feet-189.png",
+    "284": "/style/icons/feet-284.png"
+  }
+}
